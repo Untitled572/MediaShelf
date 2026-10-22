@@ -47,6 +47,7 @@ func TestResolveActorThumbAcceptsOnlySafeURLsAndRootLocalFiles(t *testing.T) {
 	}
 	local := filepath.Join(dir, "alice.png")
 	writeTestPNG(t, local)
+	local = canonicalTestPath(t, local)
 	if path, isLocal, ok := resolveActorThumb(root, dir, "alice.png", "Alice"); !ok || !isLocal || path != local {
 		t.Fatalf("local relative thumb = %q %v %v", path, isLocal, ok)
 	}
@@ -80,6 +81,7 @@ func TestResolveActorThumbFindsEmbyActorsImageAndRejectsSymlinkEscape(t *testing
 	if err := os.WriteFile(path, webp, 0600); err != nil {
 		t.Fatal(err)
 	}
+	path = canonicalTestPath(t, path)
 	if got, local, ok := resolveActorThumb(root, dir, "", "Alice"); !ok || !local || got != path {
 		t.Fatalf("Emby thumb = %q local=%v ok=%v", got, local, ok)
 	}
@@ -114,6 +116,7 @@ func TestScanUploadsLocalActorThumbAndSendsServerURL(t *testing.T) {
 		t.Fatal(err)
 	}
 	var uploaded, scanned bool
+	uploadCount := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/v1/agent/covers":
@@ -124,6 +127,7 @@ func TestScanUploadsLocalActorThumbAndSendsServerURL(t *testing.T) {
 				t.Errorf("uploaded image is not decodable JPEG: %v", err)
 			}
 			uploaded = true
+			uploadCount++
 			_, _ = w.Write([]byte(`{"url":"/covers/alice.jpg"}`))
 		case "/api/v1/agent/scan":
 			var payload struct {
@@ -156,6 +160,13 @@ func TestScanUploadsLocalActorThumbAndSendsServerURL(t *testing.T) {
 	if !uploaded || !scanned {
 		t.Fatalf("upload=%v scan=%v", uploaded, scanned)
 	}
+	if err := runner.scanLibrary(context.Background(), "lib", &rc); err != nil {
+		t.Fatal(err)
+	}
+	if uploadCount != 1 {
+		t.Fatalf("unchanged actor image uploaded %d times, want 1", uploadCount)
+	}
+	thumb = canonicalTestPath(t, thumb)
 	if cached, ok := journal.CachedCover(thumb, mustStat(t, thumb).Size(), mustStat(t, thumb).ModTime()); !ok || cached != "/covers/alice.jpg" {
 		t.Fatalf("avatar upload was not cached: %q %v", cached, ok)
 	}
@@ -190,4 +201,15 @@ func mustStat(t *testing.T, path string) os.FileInfo {
 func decodeTestWebP() ([]byte, error) {
 	// A 1x1 lossless WebP fixture.
 	return base64.StdEncoding.DecodeString("UklGRiIAAABXRUJQVlA4IBYAAAAwAQCdASoBAAEAAUAmJaQAA3AA/v89WAAAAA==")
+}
+
+// Windows temp directories can use an 8.3 alias while EvalSymlinks returns
+// the long path. Compare the resolved result with the canonical expected path.
+func canonicalTestPath(t *testing.T, path string) string {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resolved
 }

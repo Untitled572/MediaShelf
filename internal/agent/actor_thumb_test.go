@@ -89,8 +89,16 @@ func TestResolveActorThumbFindsEmbyActorsImageAndRejectsSymlinkEscape(t *testing
 	if err := os.Symlink(outside, link); err != nil {
 		t.Skipf("symlink unavailable: %v", err)
 	}
-	if got, _, ok := resolveActorThumb(root, dir, "escaped.png", "Alice"); ok {
-		t.Fatalf("symlink escape accepted: %q", got)
+	if got, ok := validateLibraryImagePath(root, link); ok {
+		t.Fatalf("symlink target outside library accepted: %q", got)
+	}
+	// Alice has a valid in-library Emby image, so rejecting the explicit
+	// symlink may safely fall back to that image rather than returning empty.
+	if got, local, ok := resolveActorThumb(root, dir, "escaped.png", "Alice"); !ok || !local || got != path {
+		t.Fatalf("safe avatar fallback = %q local=%v ok=%v", got, local, ok)
+	}
+	if got, _, ok := resolveActorThumb(root, dir, "escaped.png", "NoFallbackActor"); ok {
+		t.Fatalf("symlink escape without safe fallback accepted: %q", got)
 	}
 }
 

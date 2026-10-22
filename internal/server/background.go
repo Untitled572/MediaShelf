@@ -44,22 +44,28 @@ func (a *App) refreshDueFeeds(ctx context.Context) {
 		if s := str(f["exclude"]); s != "" {
 			rules.Exclude = []string{s}
 		}
-		items, e := integrations.FetchFeed(ctx, str(f["url"]), rules)
+		proxyURL, e := a.outboundProxy()
+		if e == nil {
+			items, fetchErr := integrations.FetchFeed(ctx, str(f["url"]), rules, proxyURL)
+			if fetchErr != nil {
+				e = fetchErr
+			} else {
+				for _, it := range items {
+					o := toObject(it)
+					o["id"] = digest(it.URL)
+					o["source"] = f["name"]
+					o["status"] = "new"
+					if old, _ := a.get("candidates", str(o["id"])); old != nil {
+						continue
+					}
+					_ = a.put("candidates", o)
+				}
+				f["last_refresh"] = now()
+				f["last_error"] = ""
+			}
+		}
 		if e != nil {
 			f["last_error"] = e.Error()
-		} else {
-			for _, it := range items {
-				o := toObject(it)
-				o["id"] = digest(it.URL)
-				o["source"] = f["name"]
-				o["status"] = "new"
-				if old, _ := a.get("candidates", str(o["id"])); old != nil {
-					continue
-				}
-				_ = a.put("candidates", o)
-			}
-			f["last_refresh"] = now()
-			f["last_error"] = ""
 		}
 		_ = a.put("feeds", f)
 	}

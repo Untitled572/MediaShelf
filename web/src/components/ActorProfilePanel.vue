@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import {ref,watch} from 'vue'
-import {request,json} from '../api'
+import {request,json,currentToken} from '../api'
 import ActorAvatar from './ActorAvatar.vue'
 const props=defineProps<{name:string;privacy:boolean;avatar?:string}>()
 const profile=ref<any>({}),loading=ref(false),error=ref('')
 let generation=0
 function linkLabel(label:string){return ({'Official website':'官方网站',Wikipedia:'维基百科',Wikidata:'维基数据'} as Record<string,string>)[label]||label}
 function safeUrl(raw:string){try{const u=new URL(raw);return ['http:','https:'].includes(u.protocol)&&!u.username&&!u.password?u.href:''}catch{return ''}}
+function profileImageSrc(raw:string){const safe=safeUrl(raw);if(!safe)return '';const u=new URL('/api/v1/images',location.origin);u.searchParams.set('url',safe);u.searchParams.set('token',currentToken());return u.href}
 async function load(refresh=false){
  const id=++generation,name=props.name;loading.value=true;error.value=''
  try{const data=await request<any>(`/actors/${encodeURIComponent(name)}/profile`,refresh?json('POST',{}):undefined);if(id!==generation)return;profile.value=data;
@@ -16,7 +17,7 @@ async function load(refresh=false){
 watch(()=>props.name,()=>{profile.value={};void load()},{immediate:true})
 </script>
 <template><section class="actor-profile" aria-label="演员资料">
- <div class="actor-profile-heading"><div class="actor-profile-name"><ActorAvatar v-if="!privacy" :name="name" :src="avatar||profile.avatar_url"/><div><h3>{{name}}</h3><p>{{profile.description||'演员百科与公开账号'}}</p></div></div><button class="btn secondary" :disabled="loading" @click="load(true)">{{loading?'正在读取资料…':'更新演员资料'}}</button></div>
+ <div class="actor-profile-heading"><div class="actor-profile-name"><ActorAvatar v-if="!privacy" :name="name" :src="avatar||profileImageSrc(profile.avatar_url)"/><div><h3>{{name}}</h3><p>{{profile.description||'演员百科与公开账号'}}</p></div></div><button class="btn secondary" :disabled="loading" @click="load(true)">{{loading?'正在读取资料…':'更新演员资料'}}</button></div>
  <p v-if="loading" role="status">正在读取公开百科资料，已缓存资料可在设备离线时查看。</p>
  <p v-if="error" class="form-error" role="alert">{{error}}<span v-if="profile.biography"> · 保留上次缓存资料</span></p>
  <p v-if="profile.biography" class="actor-biography">{{profile.biography}}</p>

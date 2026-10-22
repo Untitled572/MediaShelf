@@ -31,6 +31,7 @@ type Metadata struct {
 	RatingCountRaw string   `json:"rating_count_raw,omitempty"`
 	RatingScale    string   `json:"rating_scale,omitempty"`
 	CoverURL       string   `json:"cover_url,omitempty"`
+	ThumbnailURL   string   `json:"thumbnail_url,omitempty"`
 	SourceURL      string   `json:"source_url,omitempty"`
 	Source         string   `json:"source"`
 }
@@ -475,7 +476,7 @@ func parseJavDBCatalog(root *html.Node, base string, p *ActorPage) {
 		if code == "" || href == "" {
 			return
 		}
-		p.Works = append(p.Works, Metadata{Code: normalizeCode(code), Title: strings.TrimSpace(nodeText(n)), Source: "javdb", SourceURL: resolveURL(base, href), CoverURL: firstImage(n)})
+		p.Works = append(p.Works, Metadata{Code: normalizeCode(code), Title: strings.TrimSpace(nodeText(n)), Source: "javdb", SourceURL: resolveURL(base, href), ThumbnailURL: safeThumbURL(base, firstImage(n))})
 	})
 }
 func parseJavLibraryCatalog(root *html.Node, base string, p *ActorPage) {
@@ -487,7 +488,7 @@ func parseJavLibraryCatalog(root *html.Node, base string, p *ActorPage) {
 		if code == "" || href == "" {
 			return
 		}
-		p.Works = append(p.Works, Metadata{Code: normalizeCode(code), Title: strings.TrimSpace(nodeText(n)), Source: "javlibrary", SourceURL: resolveURL(base, href), CoverURL: firstImage(n)})
+		p.Works = append(p.Works, Metadata{Code: normalizeCode(code), Title: strings.TrimSpace(nodeText(n)), Source: "javlibrary", SourceURL: resolveURL(base, href), ThumbnailURL: safeThumbURL(base, firstImage(n))})
 	})
 }
 func parseFanzaCatalog(root *html.Node, base string, p *ActorPage) {
@@ -518,7 +519,7 @@ func parseFanzaCatalog(root *html.Node, base string, p *ActorPage) {
 			return
 		}
 		seen[code] = true
-		p.Works = append(p.Works, Metadata{Code: code, Title: strings.TrimSpace(nodeText(n)), Source: "fanza", SourceURL: resolveURL(base, href), CoverURL: firstImage(n)})
+		p.Works = append(p.Works, Metadata{Code: code, Title: strings.TrimSpace(nodeText(n)), Source: "fanza", SourceURL: resolveURL(base, href), ThumbnailURL: safeThumbURL(base, firstImage(n))})
 	})
 }
 
@@ -766,6 +767,21 @@ func resolveURL(base, ref string) string {
 	}
 	u = b.ResolveReference(u)
 	if u.Scheme != "https" && u.Scheme != "http" {
+		return ""
+	}
+	return u.String()
+}
+
+// safeThumbURL resolves a scraped list-card image without guessing provider
+// URL rewrite conventions. Its source field is the actual image URL found in
+// the card markup, which is stored separately from detail-page cover_url.
+func safeThumbURL(base, raw string) string {
+	if strings.TrimSpace(raw) == "" {
+		return ""
+	}
+	resolved := resolveURL(base, raw)
+	u, err := url.Parse(resolved)
+	if err != nil || u.User != nil || validateExternalURL(u) != nil {
 		return ""
 	}
 	return u.String()

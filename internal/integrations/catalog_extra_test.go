@@ -7,6 +7,8 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	"golang.org/x/net/html"
 )
 
 func TestCatalogExtraDefaultsAndOperations(t *testing.T) {
@@ -60,8 +62,34 @@ func TestCatalogJavBusActorSearchAndCatalogFixtures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(page.Works) != 1 || page.Works[0].Code != "IPX-177" || page.Works[0].CoverURL != "https://provider.example/cover.jpg" || !page.HasMore || page.Complete {
+	if len(page.Works) != 1 || page.Works[0].Code != "IPX-177" || page.Works[0].ThumbnailURL != "https://provider.example/cover.jpg" || page.Works[0].CoverURL != "" || !page.HasMore || page.Complete {
 		t.Fatalf("unexpected JavBus actor catalog: %#v", page)
+	}
+}
+
+func TestActorCatalogImagesAreStoredAsThumbnails(t *testing.T) {
+	cases := []struct {
+		name  string
+		body  string
+		parse func(*html.Node, string, *ActorPage)
+	}{
+		{"javdb", `<a class="box" href="/v/1"><div class="video-title"><strong>IPX-177</strong></div><img src="/list-small.jpg"></a>`, parseJavDBCatalog},
+		{"javlibrary", `<div class="video"><a href="/v/1"><div class="id">IPX-177</div><img src="/list-small.jpg"></a></div>`, parseJavLibraryCatalog},
+		{"fanza", `<a href="/detail/?cid=ipx177">IPX-177 Sample<img src="/list-small.jpg"></a>`, parseFanzaCatalog},
+		{"javbus", `<a class="movie-box" href="/IPX-177"><span class="photo-info">IPX-177 Sample</span><img src="/list-small.jpg"></a>`, parseJavBusCatalog},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root, err := html.Parse(strings.NewReader(tc.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			page := ActorPage{}
+			tc.parse(root, "https://provider.example/actor", &page)
+			if len(page.Works) != 1 || page.Works[0].ThumbnailURL != "https://provider.example/list-small.jpg" || page.Works[0].CoverURL != "" {
+				t.Fatalf("list image should be a thumbnail only: %#v", page.Works)
+			}
+		})
 	}
 }
 

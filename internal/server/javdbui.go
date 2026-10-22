@@ -29,7 +29,12 @@ func (a *App) refreshPublicRecommendations(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	cfg, _ := a.get("sources", source)
-	client, err := integrations.NewJavDBUIClient(integrations.CatalogConfig{BaseURL: str(cfg["base_url"]), ProxyURL: str(cfg["proxy_url"])})
+	proxyURL, err := a.outboundProxy()
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	client, err := integrations.NewJavDBUIClient(integrations.CatalogConfig{BaseURL: str(cfg["base_url"]), ProxyURL: proxyURL})
 	if err != nil {
 		fail(w, 400, err.Error())
 		return

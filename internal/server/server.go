@@ -34,6 +34,7 @@ type App struct {
 	// requests use fixed Wikimedia hosts and the configured outbound proxy.
 	actorProfileAPIBase    string
 	actorProfileHTTPClient *http.Client
+	proxyTestEndpoint      string
 }
 
 func str(v any) string       { s, _ := v.(string); return s }
@@ -225,7 +226,7 @@ func (a *App) serve(w http.ResponseWriter, r *http.Request) {
 }
 func (a *App) authorized(r *http.Request) bool {
 	token := bearerToken(r)
-	if token == "" && strings.HasPrefix(r.URL.Path, "/covers/") {
+	if token == "" && (strings.HasPrefix(r.URL.Path, "/covers/") || r.URL.Path == "/api/v1/images") {
 		token = r.URL.Query().Get("token")
 	}
 	if token == "" {
@@ -279,6 +280,10 @@ func (a *App) api(w http.ResponseWriter, r *http.Request) {
 	}
 	switch kind {
 	case "works":
+		if len(p) == 2 && key == "batch-progress" {
+			a.batchProgress(w, r)
+			return
+		}
 		if len(p) == 4 && p[2] == "files" {
 			a.fileProgress(w, r, key, p[3])
 			return
@@ -317,10 +322,15 @@ func (a *App) api(w http.ResponseWriter, r *http.Request) {
 		}
 		a.jobList(w)
 	case "settings":
+		if len(p) == 3 && p[1] == "proxy" && p[2] == "test" {
+			a.proxyTest(w, r)
+			return
+		}
 		if r.Method == "GET" {
-			o, _ := a.get("settings", "main")
-			if o == nil {
-				o = Object{}
+			o, err := a.mainSettings()
+			if err != nil {
+				fail(w, http.StatusInternalServerError, err.Error())
+				return
 			}
 			write(w, 200, o)
 			return
@@ -330,8 +340,12 @@ func (a *App) api(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			o["id"] = "main"
-			a.saveResponse(w, "settings", o)
+			settings, err := a.patchMainSettings(o)
+			if err != nil {
+				fail(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			write(w, http.StatusOK, settings)
 			return
 		}
 		fail(w, 405, "Method not allowed")
@@ -594,6 +608,12 @@ func (a *App) actorsAPI(w http.ResponseWriter, r *http.Request, key string) {
 		o, ok := read(w, r)
 		if !ok {
 			return
+		}
+		if value, exists := o["favorite"]; exists {
+			if _, ok := value.(bool); !ok {
+				fail(w, 400, "收藏标记必须为布尔值")
+				return
+			}
 		}
 		current, _ := a.get("actor_policies", key)
 		if current == nil {

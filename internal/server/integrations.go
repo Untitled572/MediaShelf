@@ -28,6 +28,8 @@ func (a *App) integrationsAPI(w http.ResponseWriter, r *http.Request, p []string
 		key = p[1]
 	}
 	switch kind {
+	case "accounts":
+		a.javLibraryAccountAPI(w, r, p)
 	case "downloaders":
 		a.downloadersAPI(w, r, p)
 	case "feeds":
@@ -59,8 +61,9 @@ func (a *App) integrationsAPI(w http.ResponseWriter, r *http.Request, p []string
 	case "candidates":
 		if r.Method == "GET" {
 			xs, _ := a.list("candidates")
+			ownedCodes := recommendationOwnedCodeIndex(mustList(a, "works"))
 			for _, o := range xs {
-				o["owned"] = a.owned(str(o["code"]))
+				o["owned"] = ownedCodes.contains(str(o["code"]))
 				o["in_queue"] = str(o["status"]) == "submitted"
 			}
 			write(w, 200, xs)
@@ -606,7 +609,12 @@ func (a *App) refreshFeed(w http.ResponseWriter, r *http.Request, key string) {
 	if x := str(f["exclude"]); x != "" {
 		rules.Exclude = []string{x}
 	}
-	items, e := integrations.FetchFeed(ctx, str(f["url"]), rules)
+	proxyURL, e := a.outboundProxy()
+	if e != nil {
+		fail(w, http.StatusInternalServerError, e.Error())
+		return
+	}
+	items, e := integrations.FetchFeed(ctx, str(f["url"]), rules, proxyURL)
 	if e != nil {
 		f["last_error"] = e.Error()
 		_ = a.put("feeds", f)
@@ -632,6 +640,10 @@ func (a *App) refreshFeed(w http.ResponseWriter, r *http.Request, key string) {
 	write(w, 200, Object{"count": len(items)})
 }
 func (a *App) downloadCandidate(w http.ResponseWriter, r *http.Request, c Object) {
+	if flag(c["metadata_only"]) {
+		fail(w, http.StatusBadRequest, "此候选仅包含作品资料，请先选择磁力或种子资源")
+		return
+	}
 	o, ok := read(w, r)
 	if !ok {
 		return
@@ -695,7 +707,12 @@ func (a *App) syncCatalog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	config, _ := a.get("sources", source)
-	client, e := integrations.NewCatalogClient(integrations.CatalogConfig{Source: source, BaseURL: str(config["base_url"]), ProxyURL: str(config["proxy_url"]), Cookie: str(config["cookie"])})
+	proxyURL, e := a.outboundProxy()
+	if e != nil {
+		fail(w, http.StatusInternalServerError, e.Error())
+		return
+	}
+	client, e := integrations.NewCatalogClient(integrations.CatalogConfig{Source: source, BaseURL: str(config["base_url"]), ProxyURL: proxyURL, Cookie: str(config["cookie"])})
 	if e != nil {
 		fail(w, 400, e.Error())
 		return

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -123,7 +124,7 @@ func ParseFeed(raw []byte, rules FeedRules) ([]FeedItem, error) {
 }
 
 // FetchFeed retrieves a public RSS/Atom URL with bounded time, redirects, and body size.
-func FetchFeed(ctx context.Context, rawURL string, rules FeedRules) ([]FeedItem, error) {
+func FetchFeed(ctx context.Context, rawURL string, rules FeedRules, proxyURLs ...string) ([]FeedItem, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return nil, err
@@ -131,7 +132,16 @@ func FetchFeed(ctx context.Context, rawURL string, rules FeedRules) ([]FeedItem,
 	if err = validateExternalURL(u); err != nil {
 		return nil, err
 	}
-	client := &http.Client{Timeout: 12 * time.Second, Transport: &http.Transport{DialContext: safeExternalDial}, CheckRedirect: func(req *http.Request, via []*http.Request) error {
+	transport := &http.Transport{DialContext: safeExternalDial}
+	if len(proxyURLs) > 0 && strings.TrimSpace(proxyURLs[0]) != "" {
+		proxy, err := url.Parse(strings.TrimSpace(proxyURLs[0]))
+		if err != nil || proxy.Host == "" || proxy.User != nil || (proxy.Scheme != "http" && proxy.Scheme != "https") || proxy.RawQuery != "" || proxy.Fragment != "" {
+			return nil, errors.New("invalid feed proxy URL")
+		}
+		transport.Proxy = http.ProxyURL(proxy)
+		transport.DialContext = (&net.Dialer{Timeout: 8 * time.Second}).DialContext
+	}
+	client := &http.Client{Timeout: 12 * time.Second, Transport: transport, CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 5 {
 			return errors.New("too many feed redirects")
 		}

@@ -286,10 +286,14 @@ func (a *App) actorProfileClient() (*http.Client, error) {
 		return &http.Client{Timeout: actorProfileTimeout}, nil
 	}
 	transport := &http.Transport{TLSHandshakeTimeout: 5 * time.Second, ResponseHeaderTimeout: 7 * time.Second}
-	if cfg, err := a.get("sources", "javdbui"); err == nil && str(cfg["proxy_url"]) != "" {
-		proxy, err := url.Parse(str(cfg["proxy_url"]))
+	proxyURL, err := a.outboundProxy()
+	if err != nil {
+		return nil, err
+	}
+	if proxyURL != "" {
+		proxy, err := url.Parse(proxyURL)
 		if err != nil || proxy.Host == "" || (proxy.Scheme != "http" && proxy.Scheme != "https") {
-			return nil, errors.New("JavDB UI proxy URL is invalid")
+			return nil, errors.New("global proxy URL is invalid")
 		}
 		transport.Proxy = http.ProxyURL(proxy)
 		transport.DialContext = (&net.Dialer{Timeout: 5 * time.Second}).DialContext

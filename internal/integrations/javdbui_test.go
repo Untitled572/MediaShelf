@@ -88,6 +88,26 @@ func TestJavDBUILookupSearchesExactCodeAndEnriches(t *testing.T) {
 	}
 }
 
+func TestJavDBUISeparatesThumbnailAndFullCoverDuringEnrichment(t *testing.T) {
+	list := javDBUIMetadata(javDBUIMovie{
+		Number:   "IPX-177",
+		CoverURL: "https://img.example/full.jpg",
+		ThumbURL: "https://img.example/thumb.jpg",
+	})
+	if list.CoverURL != "https://img.example/full.jpg" || list.ThumbnailURL != "https://img.example/thumb.jpg" {
+		t.Fatalf("JavDB UI list images were not separated: %#v", list)
+	}
+
+	detail := javDBUIMetadata(javDBUIMovie{
+		Number:   "IPX-177",
+		CoverURL: "https://img.example/full-detail.jpg",
+	})
+	merged := mergeJavDBUIMetadata(list, detail)
+	if merged.CoverURL != "https://img.example/full-detail.jpg" || merged.ThumbnailURL != "https://img.example/thumb.jpg" {
+		t.Fatalf("detail cover should enrich without replacing the list thumbnail: %#v", merged)
+	}
+}
+
 func TestJavDBUILatestAndActorRecommendationsPreserveProviderLists(t *testing.T) {
 	client := javDBUITestClient(t, func(req *http.Request) (*http.Response, error) {
 		switch req.URL.Path {

@@ -11,10 +11,10 @@ const icons=source.match(/import \{([^}]+)\} from 'lucide-vue-next'/)[1].split('
 function app(request){
  let token='current-session'
  class ApiError extends Error{constructor(status,message){super(message);this.status=status}}
- const context=vm.createContext({URL,ref,computed,watch(){},onMounted(){},onUnmounted(){},request,ApiError,
-  currentToken:()=>token,clearToken:()=>{token=''},rememberToken(){},json(){},
+ const context=vm.createContext({URL,location:{origin:'https://app.example'},ref,computed,watch(){},onMounted(){},onUnmounted(){},request,ApiError,
+  currentToken:()=>token,clearToken:()=>{token=''},rememberToken(){},json(method,body){return {method,body:JSON.stringify(body)}},
   localStorage:{getItem:()=>null},window:{},document:{},...Object.fromEntries(icons.map(n=>[n,()=>{}]))})
- const body=source.replace(/^import .*$/gm,'')+'\nglobalThis.harness={refresh,section,devices,libraries,devicesLoaded,error,selectedDownloaderId,loadDownloader,login,loginMode,password,loadRecommendations,visibleRecommendations,visibleActorRecs,nextRecommendationBatch,recommendationsLoaded,recommendationLoading,fileOnline,openListUrl,actorRecs};'
+ const body=source.replace(/^import .*$/gm,'')+'\nglobalThis.harness={refresh,section,devices,libraries,devicesLoaded,error,selectedDownloaderId,loadDownloader,login,loginMode,password,loadRecommendations,visibleRecommendations,visibleActorRecs,nextRecommendationBatch,recommendationsLoaded,recommendationLoading,fileOnline,openListUrl,actorRecs,workCoverSrc,markCoverFailed,works,selectedWorkIds,batchProgress,batchProgressChanges,saveBatchProgress,batchMode,toggleBatchMode};'
  vm.runInContext(ts.transpileModule(body,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.None}}).outputText,context)
  return context.harness
 }
@@ -82,4 +82,37 @@ test('offline files have no playback URL but remain in the database model',()=>{
  assert.equal(ui.openListUrl(file),'')
  ui.devices.value[0].online=true
  assert.equal(ui.openListUrl(file),'https://files.example/film.mp4')
+})
+
+test('local covers win; remote small covers precede full covers and fall back on failure',()=>{
+ const ui=app(async()=>[])
+ const work={cover_url:'https://images.example/full.jpg',thumbnail_url:'https://images.example/small.jpg'}
+ assert.equal(new URL(ui.workCoverSrc(work)).searchParams.get('url'),work.thumbnail_url)
+ ui.markCoverFailed(work)
+ assert.equal(new URL(ui.workCoverSrc(work)).searchParams.get('url'),work.cover_url)
+ work.cover_url='/covers/local.jpg'
+ assert.equal(new URL(ui.workCoverSrc(work)).pathname,'/covers/local.jpg')
+})
+
+test('batch editing sends only checked works and changed progress fields',async()=>{
+ let sent
+ const fixture=[{id:'a',files:[{id:'a1',missing:false}]},{id:'b',files:[{id:'b1',missing:false}]},{id:'c',files:[]}]
+ const ui=app(async(path,init)=>{if(path==='/works/batch-progress'){sent=JSON.parse(init.body);return {updated_works:2,updated_files:2}}return path==='/works'?fixture:[]})
+ ui.works.value=fixture
+ ui.selectedWorkIds.value=['a','b']
+ ui.batchProgress.value={compression:'',cutting:'',translation:'done',verified:''}
+ await ui.saveBatchProgress()
+ assert.deepEqual(sent,{ids:['a','b'],progress:{translation:'done'}})
+ assert.equal(ui.selectedWorkIds.value.length,0)
+})
+
+test('batch selection is hidden initially and leaving management clears selection',()=>{
+ const ui=app(async()=>[])
+ assert.equal(ui.batchMode.value,false)
+ ui.toggleBatchMode()
+ assert.equal(ui.batchMode.value,true)
+ ui.selectedWorkIds.value=['a']
+ ui.toggleBatchMode()
+ assert.equal(ui.batchMode.value,false)
+ assert.equal(ui.selectedWorkIds.value.length,0)
 })

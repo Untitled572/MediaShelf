@@ -310,9 +310,7 @@ func javDBUIMetadata(movie javDBUIMovie) Metadata {
 		}
 	}
 	metadata.CoverURL = safeJavDBUIImage(movie.CoverURL)
-	if metadata.CoverURL == "" {
-		metadata.CoverURL = safeJavDBUIImage(movie.ThumbURL)
-	}
+	metadata.ThumbnailURL = safeJavDBUIImage(movie.ThumbURL)
 	if score := parseJavDBUIScore(movie.Score); score > 0 {
 		metadata.Rating = &score
 		metadata.SourceRating = &score
@@ -333,8 +331,9 @@ func mergeJavDBUIDetail(metadata Metadata, detail javDBUIMovie) Metadata {
 	}
 	if cover := safeJavDBUIImage(detail.CoverURL); cover != "" {
 		metadata.CoverURL = cover
-	} else if cover := safeJavDBUIImage(detail.ThumbURL); cover != "" {
-		metadata.CoverURL = cover
+	}
+	if thumb := safeJavDBUIImage(detail.ThumbURL); thumb != "" {
+		metadata.ThumbnailURL = thumb
 	}
 	metadata.Actors = metadata.Actors[:0]
 	for _, actor := range detail.Actors {
@@ -370,6 +369,9 @@ func mergeJavDBUIMetadata(base, detail Metadata) Metadata {
 	if detail.CoverURL != "" {
 		base.CoverURL = detail.CoverURL
 	}
+	if detail.ThumbnailURL != "" {
+		base.ThumbnailURL = detail.ThumbnailURL
+	}
 	if len(detail.Actors) != 0 {
 		base.Actors = detail.Actors
 	}
@@ -390,7 +392,7 @@ func safeJavDBUIImage(raw string) string {
 		return ""
 	}
 	u, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || validateExternalURL(u) != nil || u.Scheme != "https" {
+	if err != nil || u.User != nil || validateExternalURL(u) != nil || u.Scheme != "https" {
 		return ""
 	}
 	return u.String()

@@ -204,7 +204,7 @@ func parseJavBusCatalog(root *html.Node, base string, p *ActorPage) {
 			return
 		}
 		seen[code] = true
-		p.Works = append(p.Works, Metadata{Code: code, Title: strings.TrimSpace(strings.TrimPrefix(text, code)), Source: "javbus", SourceURL: resolveURL(base, href), CoverURL: resolveURL(base, firstImage(n))})
+		p.Works = append(p.Works, Metadata{Code: code, Title: strings.TrimSpace(strings.TrimPrefix(text, code)), Source: "javbus", SourceURL: resolveURL(base, href), ThumbnailURL: safeThumbURL(base, firstImage(n))})
 	})
 }
 

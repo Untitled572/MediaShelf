@@ -15,6 +15,10 @@ import (
 // discovery handles catalog search, actor selection, aliases, enrichment and
 // preference-based discovery routes. It returns false for routes it does not own.
 func (a *App) discovery(w http.ResponseWriter, r *http.Request, p []string) bool {
+	if len(p) == 1 && p[0] == "images" {
+		a.serveRemoteImage(w, r)
+		return true
+	}
 	if len(p) == 2 && p[0] == "catalog" && p[1] == "refresh" {
 		a.refreshPublicRecommendations(w, r)
 		return true
@@ -132,15 +136,19 @@ func catalogID(source, code string) string {
 
 func (a *App) lookup(ctx context.Context, source, code string) (integrations.Metadata, error) {
 	cfg, _ := a.get("sources", source)
+	proxyURL, err := a.outboundProxy()
+	if err != nil {
+		return integrations.Metadata{}, err
+	}
 	if source == "javdbui" {
-		client, err := integrations.NewJavDBUIClient(integrations.CatalogConfig{BaseURL: str(cfg["base_url"]), ProxyURL: str(cfg["proxy_url"])})
+		client, err := integrations.NewJavDBUIClient(integrations.CatalogConfig{BaseURL: str(cfg["base_url"]), ProxyURL: proxyURL})
 		if err != nil {
 			return integrations.Metadata{}, err
 		}
 		return client.Lookup(ctx, code)
 	}
 	c, err := integrations.NewCatalogClient(integrations.CatalogConfig{
-		Source: source, BaseURL: str(cfg["base_url"]), ProxyURL: str(cfg["proxy_url"]), Cookie: str(cfg["cookie"]),
+		Source: source, BaseURL: str(cfg["base_url"]), ProxyURL: proxyURL, Cookie: str(cfg["cookie"]),
 	})
 	if err != nil {
 		return integrations.Metadata{}, err
@@ -154,7 +162,7 @@ func (a *App) mergeCatalog(incoming Object) error {
 	id := str(incoming["id"])
 	old, _ := a.get("catalog", id)
 	if old != nil {
-		for _, key := range []string{"title", "year", "actors", "tags", "rating", "source_rating", "rating_count", "rating_raw", "rating_count_raw", "rating_scale", "cover_url", "source_url"} {
+		for _, key := range []string{"title", "year", "actors", "tags", "rating", "source_rating", "rating_count", "rating_raw", "rating_count_raw", "rating_scale", "cover_url", "thumbnail_url", "source_url"} {
 			if isEmpty(incoming[key]) {
 				incoming[key] = old[key]
 			}
@@ -532,19 +540,29 @@ func (a *App) enrichCatalog(w http.ResponseWriter, r *http.Request, id string) {
 		fail(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	old["actors"] = mergeStrings(actorNames(old["actors"]), m.Actors)
-	old["tags"] = mergeStrings(actorNames(old["tags"]), m.Tags)
-	for _, key := range []string{"title", "year", "rating", "source_rating", "rating_count", "rating_raw", "rating_count_raw", "rating_scale", "cover_url", "source_url"} {
-		if isEmpty(old[key]) && !isEmpty(metadataField(m, key)) {
-			old[key] = metadataField(m, key)
-		}
-	}
+	old = mergeEnrichedCatalogMetadata(old, m)
 	old["enriched_at"] = now()
 	if err = a.put("catalog", old); err != nil {
 		fail(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	write(w, http.StatusOK, old)
+}
+
+func mergeEnrichedCatalogMetadata(old Object, m integrations.Metadata) Object {
+	old["actors"] = mergeStrings(actorNames(old["actors"]), m.Actors)
+	old["tags"] = mergeStrings(actorNames(old["tags"]), m.Tags)
+	for _, key := range []string{"title", "year", "rating", "source_rating", "rating_count", "rating_raw", "rating_count_raw", "rating_scale", "thumbnail_url", "source_url"} {
+		if isEmpty(old[key]) && !isEmpty(metadataField(m, key)) {
+			old[key] = metadataField(m, key)
+		}
+	}
+	// Enrichment fetches a provider's detail page, where cover_url is the full
+	// cover. Older catalog rows may have stored the smaller list image there.
+	if !isEmpty(m.CoverURL) {
+		old["cover_url"] = m.CoverURL
+	}
+	return old
 }
 
 func metadataField(m integrations.Metadata, key string) any {

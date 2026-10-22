@@ -209,7 +209,7 @@ func (q *QBittorrent) apiVersion(ctx context.Context) (int, error) {
 			return 0, err
 		}
 	}
-	s := strings.Split(q.version, ".")
+	s := strings.Split(strings.TrimPrefix(strings.TrimSpace(q.version), "v"), ".")
 	if len(s) < 2 {
 		return 0, fmt.Errorf("unrecognized qBittorrent version %q", q.version)
 	}
@@ -283,13 +283,21 @@ func (q *QBittorrent) Add(ctx context.Context, a AddTorrent) error {
 	}
 	if a.Paused {
 		v.Set("paused", "true")
+		v.Set("stopped", "true")
 	}
 	var status string
 	if err := q.request(ctx, http.MethodPost, "torrents/add", v, &status); err != nil {
 		return err
 	}
 	if status != "" && status != "Ok." {
-		return fmt.Errorf("qBittorrent add failed: %s", status)
+		var result struct {
+			Success int `json:"success_count"`
+			Pending int `json:"pending_count"`
+			Failure int `json:"failure_count"`
+		}
+		if json.Unmarshal([]byte(status), &result) != nil || result.Failure != 0 || result.Success+result.Pending < 1 {
+			return fmt.Errorf("qBittorrent add failed: %s", status)
+		}
 	}
 	return nil
 }

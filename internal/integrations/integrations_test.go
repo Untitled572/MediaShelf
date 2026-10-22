@@ -335,7 +335,7 @@ func TestQBittorrentAddValidatesBusinessResponse(t *testing.T) {
 	for _, tc := range []struct {
 		name, body string
 		wantErr    bool
-	}{{"ok", "Ok.", false}, {"empty compatibility response", "", false}, {"business failure", "Fails.", true}} {
+	}{{"ok", "Ok.", false}, {"empty compatibility response", "", false}, {"business failure", "Fails.", true}, {"5.3 success", `{"success_count":1,"pending_count":0,"failure_count":0}`, false}, {"5.3 pending", `{"success_count":0,"pending_count":1,"failure_count":0}`, false}, {"5.3 failure", `{"success_count":0,"pending_count":0,"failure_count":1}`, true}, {"unrecognized json", `{}`, true}} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.Method != http.MethodPost || r.URL.Path != "/api/v2/torrents/add" {
@@ -617,5 +617,15 @@ func TestCatalogFetchDistinguishesBrowserChallengeFromCloudflareCDN(t *testing.T
 	normal := `<html><head><script src="https://cdnjs.cloudflare.com/ajax/libs/example/1.0/app.js"></script><script src="https://static.cloudflareinsights.com/beacon.min.js"></script></head><body><a class="box" href="/movie/1">ABF-243</a></body></html>`
 	if _, _, err := newClient(normal).fetch(context.Background(), "https://provider.example/search?q=ABF-243"); err != nil {
 		t.Fatalf("ordinary Cloudflare CDN references were mistaken for a challenge: %v", err)
+	}
+}
+
+func TestQBittorrentVersionPrefix(t *testing.T) {
+	for version, want := range map[string]int{"v5.3.0": 503, "v5.2.4.10": 502, "4.6.7": 406, "v4.6.7": 406} {
+		q := &QBittorrent{version: version}
+		got, err := q.apiVersion(context.Background())
+		if err != nil || got != want {
+			t.Fatalf("%s: %d %v", version, got, err)
+		}
 	}
 }

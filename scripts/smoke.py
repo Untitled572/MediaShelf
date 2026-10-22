@@ -40,4 +40,3 @@ assert any(a['name']=='独立关注演员' for a in admin('GET','/actors'))
 backup=admin('GET','/backup');assert backup['schema_version']==1
 assert 'password' not in json.dumps(backup)
 print(json.dumps({'api_smoke':'passed','works_in_fixture':1,'segments':2,'checks':['device scan','typed NFO IDs','premiered year','actor import','half rating','segment isolation','rescan preservation','independent actor','metadata backup']},ensure_ascii=False))
-

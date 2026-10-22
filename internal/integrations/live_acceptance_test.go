@@ -31,7 +31,7 @@ func TestLiveQBittorrentAcceptance(t *testing.T) {
 	if err = q.Login(ctx); err != nil {
 		t.Fatalf("live qBittorrent login failed: %v", err)
 	}
-	if !strings.HasPrefix(q.version, "5.3.") {
+	if !strings.HasPrefix(strings.TrimPrefix(q.version, "v"), "5.3.") {
 		t.Fatalf("isolated acceptance requires qBittorrent 5.3; server reported %q", q.version)
 	}
 	initialTorrents, err := q.ListTorrents(ctx, "")
@@ -48,8 +48,14 @@ func TestLiveQBittorrentAcceptance(t *testing.T) {
 	}
 	const category = "mediashelf-acceptance"
 	const savePath = "/downloads/acceptance-preserve"
-	if err = q.request(ctx, "POST", "torrents/createCategory", url.Values{"category": {category}, "savePath": {savePath}}, nil); err != nil {
-		t.Fatalf("create isolated acceptance category: %v", err)
+	cats, err := q.ListCategories(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := cats[category]; !exists {
+		if err = q.request(ctx, "POST", "torrents/createCategory", url.Values{"category": {category}, "savePath": {savePath}}, nil); err != nil {
+			t.Fatalf("create isolated acceptance category: %v", err)
+		}
 	}
 
 	const autoHash = "0123456789abcdef0123456789abcdef01234567"
@@ -78,7 +84,7 @@ func TestLiveQBittorrentAcceptance(t *testing.T) {
 	if got, ok := byHash[autoHash]; !ok || !got.AutoTMM || got.Category != category {
 		t.Fatalf("categorized automatic torrent state = %#v, present=%v", got, ok)
 	}
-	if got, ok := byHash[manualHash]; !ok || got.AutoTMM || got.Category != "" || !strings.EqualFold(got.SavePath, savePath) {
+	if got, ok := byHash[manualHash]; !ok || got.AutoTMM || got.Category != "" || !strings.EqualFold(strings.TrimRight(got.SavePath, "/"), savePath) {
 		t.Fatalf("uncategorized manual torrent state = %#v, present=%v", got, ok)
 	}
 

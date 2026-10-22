@@ -1,0 +1,9 @@
+{
+  "name": "mediashelf-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": { "dev": "vite", "build": "vue-tsc -b && vite build", "preview": "vite preview" },
+  "dependencies": { "@vitejs/plugin-vue": "latest", "vite": "latest", "vue": "latest", "lucide-vue-next": "^0.468.0" },
+  "devDependencies": { "typescript": "~5.7.2", "vue-tsc": "^2.2.0" }
+}

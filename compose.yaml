@@ -1,0 +1,17 @@
+services:
+  mediashelf:
+    build: .
+    image: mediashelf:local
+    restart: unless-stopped
+    ports:
+      - "${MEDIASHELF_BIND:-127.0.0.1}:${MEDIASHELF_PORT:-18765}:8765"
+    environment:
+      MEDIASHELF_PASSWORD: ${MEDIASHELF_PASSWORD:?Set a password of at least 12 characters}
+    volumes:
+      - mediashelf-data:/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+volumes:
+  mediashelf-data:

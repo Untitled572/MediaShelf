@@ -1,0 +1,20 @@
+# MediaShelf implementation contract
+Independent project. Do not modify existing media or tool projects. Do not read secrets from their configs.
+Stack: Go HTTP API and Windows agent; Vue 3 TypeScript Vite UI; SQLite (modernc.org/sqlite). Server :8765.
+API JSON snake_case; successful lists are plain arrays. Errors {error:string}. Auth login POST /api/v1/login {password} -> {token}; Bearer token thereafter. Setup password from MEDIASHELF_PASSWORD; refuse default public exposure, server default bind 127.0.0.1:8765.
+Entities:
+Work {id,code,title,year,actors: string[],tags:string[],rating:number|null,source_rating:number|null,cover_url,source_url,kind,collection_status,files:File[],progress:Progress}
+File {id,device_id,library_id,relative_path,size,modified_at,version,missing:boolean}
+Progress {compression,cutting,translation,verified:boolean}; step strings pending/in_progress/done/not_needed.
+Device {id,name,online,last_seen}; Library {id,device_id,name,path,openlist_base,openlist_prefix}
+Tool {id,device_id,name,path,working_dir}; Job {id,device_id,type,payload,status,result,created_at}
+GET /api/v1/works?q=&actor=&year=&status=; GET/PATCH /api/v1/works/{id}; PATCH accepts rating, progress,title,actors,tags,collection_status.
+GET /api/v1/actors -> [{name,count,policy,target}]; PATCH /api/v1/actors/{name} {policy:complete/selective/follow,target:2}.
+GET/POST /api/v1/libraries; GET /api/v1/devices; POST /api/v1/devices {name} -> {id,token}; GET/POST /api/v1/tools; POST /api/v1/tools/{id}/launch; POST /api/v1/libraries/{id}/scan; GET /api/v1/jobs.
+Agent endpoints use device Bearer token: GET /api/v1/agent/config -> {device_id,libraries:[],tools:[]}; POST /api/v1/agent/heartbeat {}; POST /api/v1/agent/poll -> Job[]; POST /api/v1/agent/jobs/{id}/result {status,result}; POST /api/v1/agent/scan {library_id,complete:boolean,works:Work[]}.
+Agent uploads local covers using POST /api/v1/agent/covers Content-Type image/jpeg or image/png raw bytes -> {url}; max 8 MB. Scan File.relative_path relative to configured root, size in bytes, modified_at RFC3339. Work.code normalized uppercase, may be empty for unidentified; id optional. Agent scans video extensions mp4,mkv,avi,mov,wmv,m4v,webm; reads sibling stem.nfo then movie.nfo; folder movie.nfo groups files, stem NFO may share code. Default scan kind from top folder. Never move files. No arbitrary shell via remote payload. Launch jobs payload {tool_id}; scan jobs {library_id}. Agent accepts only locally allowlisted roots/tools from agent JSON config; server configuration cannot grant local execution access.
+GET/POST /api/v1/downloaders; downloader {id,name,url,username,password,device_id(optional)}; GET /api/v1/downloaders/{id}/torrents; POST .../{id}/action {action,start/stop/delete,hashes,delete_files:false}; POST .../{id}/add {url,code,save_path,category}; credentials redacted GET.
+GET/POST /api/v1/feeds {id,name,url,include,exclude}; POST /api/v1/feeds/{id}/refresh; GET /api/v1/candidates -> [{id,code,title,url,source,owned,in_queue,status}]; POST /api/v1/candidates/{id}/download {downloader_id,save_path,category}; PATCH /api/v1/candidates/{id} {status:ignored}.
+GET /api/v1/recommendations -> [{work:Work,reason,score}]; GET /api/v1/actor-recommendations -> [{name,reason,score}]; GET /api/v1/catalog?actor=; POST /api/v1/catalog/sync {actor,source}; source adapters may return explicit unavailable, never fabricate complete.
+GET /api/v1/settings -> JSON; PATCH /api/v1/settings JSON; GET /api/v1/backup returns database export JSON, POST /api/v1/restore accepts it (confirmation UI required).
+Frontend builds dist; server serves web/dist if present via env MEDIASHELF_WEB_DIR. UI dev proxy /api -> localhost:8765. All UI Chinese.

@@ -1,0 +1,12 @@
+/data/
+/dist/
+/web/node_modules/
+/web/dist/
+*.db
+*.db-shm
+*.db-wal
+agent.json
+.env
+*.log
+*.exe
+coverage.out

@@ -1,0 +1,19 @@
+{
+  "server_url": "http://127.0.0.1:8765",
+  "token": "replace-with-the-device-token-from-MediaShelf",
+  "scan_interval_minutes": 60,
+  "libraries": {
+    "library-id-from-server": "F:\\Media\\Library"
+  },
+  "tools": {
+    "tool-id-from-server": {
+      "path": "C:\\Program Files\\Example Player\\player.exe",
+      "working_dir": "C:\\Program Files\\Example Player"
+    }
+  },
+  "downloaders": {
+    "downloader-id-from-server": {
+      "url": "http://127.0.0.1:8080"
+    }
+  }
+}

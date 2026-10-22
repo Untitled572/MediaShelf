@@ -56,6 +56,30 @@ type Category struct {
 
 var errResponseTooLarge = errors.New("response exceeds 4 MiB limit")
 
+type qbAPIError struct {
+	path       string
+	statusCode int
+}
+
+func (e *qbAPIError) Error() string {
+	return fmt.Sprintf("qBittorrent API %s: HTTP %d", e.path, e.statusCode)
+}
+
+type qbLoginRejectionError struct{ status string }
+
+func (e *qbLoginRejectionError) Error() string {
+	return fmt.Sprintf("qBittorrent login failed: %s", e.status)
+}
+
+func isQBAuthRejection(err error) bool {
+	var apiErr *qbAPIError
+	if errors.As(err, &apiErr) && apiErr.path == "auth/login" && (apiErr.statusCode == http.StatusUnauthorized || apiErr.statusCode == http.StatusForbidden) {
+		return true
+	}
+	var loginErr *qbLoginRejectionError
+	return errors.As(err, &loginErr) && loginErr.status == "Fails."
+}
+
 const qbLoginFailureCooldown = 5 * time.Minute
 
 var qbLoginFailures = struct {
@@ -95,7 +119,7 @@ func (q *QBittorrent) request(ctx context.Context, method, path string, values u
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("qBittorrent API %s: HTTP %d", path, resp.StatusCode)
+		return &qbAPIError{path: path, statusCode: resp.StatusCode}
 	}
 	if path == "auth/login" {
 		b, err := io.ReadAll(io.LimitReader(resp.Body, 1024))
@@ -106,7 +130,7 @@ func (q *QBittorrent) request(ctx context.Context, method, path string, values u
 		// qBittorrent 5.3 may return HTTP 200 with an empty body while still
 		// establishing the session cookie. Login validates it with app/version.
 		if status != "" && status != "Ok." {
-			return fmt.Errorf("qBittorrent login failed: %s", status)
+			return &qbLoginRejectionError{status: status}
 		}
 		return nil
 	}
@@ -151,7 +175,9 @@ func (q *QBittorrent) Login(ctx context.Context) error {
 		}
 	}
 	if err != nil {
-		cacheAuthFailure(key, time.Now().Add(qbLoginFailureCooldown))
+		if isQBAuthRejection(err) {
+			cacheAuthFailure(key, time.Now().Add(qbLoginFailureCooldown))
+		}
 		return err
 	}
 	q.version = strings.TrimSpace(v)

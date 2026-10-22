@@ -268,6 +268,69 @@ func TestQBittorrentFailedCredentialsCoolDownAndChangedCredentialsRetry(t *testi
 	}
 }
 
+func TestQBittorrentTransientLoginFailuresRetryImmediately(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		fail func(http.ResponseWriter, *http.Request)
+	}{
+		{name: "network error", fail: func(w http.ResponseWriter, r *http.Request) {
+			hijacker, ok := w.(http.Hijacker)
+			if !ok {
+				t.Fatal("test server does not support connection hijacking")
+			}
+			conn, _, err := hijacker.Hijack()
+			if err != nil {
+				t.Fatalf("hijack login connection: %v", err)
+			}
+			_ = conn.Close()
+		}},
+		{name: "version HTTP 500", fail: func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "temporary failure", http.StatusInternalServerError)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var loginRequests atomic.Int32
+			var versionRequests atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/v2/auth/login":
+					if loginRequests.Add(1) == 1 && tc.name == "network error" {
+						tc.fail(w, r)
+						return
+					}
+					_, _ = io.WriteString(w, "Ok.")
+				case "/api/v2/app/version":
+					if versionRequests.Add(1) == 1 && tc.name == "version HTTP 500" {
+						tc.fail(w, r)
+						return
+					}
+					_, _ = io.WriteString(w, "5.3.0")
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+
+			q, err := NewQBittorrent(QBConfig{URL: srv.URL, Username: "transient-user", Password: "secret"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := q.Login(context.Background()); err == nil {
+				t.Fatal("first Login unexpectedly succeeded")
+			}
+			if err := q.Login(context.Background()); err != nil {
+				t.Fatalf("retry after transient failure was suppressed or failed: %v", err)
+			}
+			if got := loginRequests.Load(); got != 2 {
+				t.Fatalf("auth/login requests = %d, want 2", got)
+			}
+			if tc.name == "version HTTP 500" && versionRequests.Load() != 2 {
+				t.Fatalf("version requests = %d, want 2", versionRequests.Load())
+			}
+		})
+	}
+}
+
 func TestQBittorrentListUsesCategoryQueryAndKeepsRates(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v2/torrents/info" || r.URL.Query().Get("category") != "vr" || r.URL.Query().Get("sort") != "hash" || r.URL.Query().Get("reverse") != "false" {

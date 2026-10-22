@@ -8,7 +8,6 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -47,8 +46,12 @@ func env(k, d string) string {
 	return d
 }
 func New(data, password, web string) (*App, error) {
-	if len(password) < 12 {
-		return nil, errors.New("MEDIASHELF_PASSWORD must have at least 12 characters")
+	minimum := 12
+	if os.Getenv("MEDIASHELF_ALLOW_SHORT_PASSWORD") == "true" {
+		minimum = 6
+	}
+	if len(password) < minimum {
+		return nil, fmt.Errorf("MEDIASHELF_PASSWORD must have at least %d characters", minimum)
 	}
 	if err := os.MkdirAll(filepath.Join(data, "covers"), 0700); err != nil {
 		return nil, err

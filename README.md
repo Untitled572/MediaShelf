@@ -103,3 +103,5 @@ CI 同时检查 Windows、Linux、前端和 Docker 构建。真实环境验收�
 本机运行 `pwsh -NoLogo -NoProfile -File ./scripts/start-desktop.ps1`，会复用或建立 SSH 隧道、启动允许目录内的 Windows 连接程序并打开浏览器。默认读取忽略目录 `data/production-agent.json`；其它部署通过脚本参数指定 SSH 目标、端口和配置路径。没有自动安装开机启动。
 
 Linux 宿主机代理只监听 `127.0.0.1` 时，可选择 `docker compose -f compose.host.yaml up -d --build`。此方案使用 host 网络，服务仍只监听 `127.0.0.1:18765`，通过 SSH 转发访问；不同时启动默认 Compose 与 host 方案。默认桥接 Compose 仍可使用容器可达的代理地址。健康检查会跟随服务端端口。
+
+如需使用 6–11 位服务密码，须同时设置 `MEDIASHELF_ALLOW_SHORT_PASSWORD=true`。默认仍要求至少 12 位；启用此选项保留所有接口的登录验证，不接受空密码。

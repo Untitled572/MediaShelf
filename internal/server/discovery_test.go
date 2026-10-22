@@ -119,3 +119,28 @@ func TestRecommendationsUseNormalizedRatingsSelectiveTargetAndCoactors(t *testin
 		t.Fatalf("unexpected co-actor recommendation: %#v", actors)
 	}
 }
+
+func TestRecommendationsExcludeOwnedDuplicatesButKeepMissingFiles(t *testing.T) {
+	a := testApp(t)
+	_ = a.put("works", Object{"id": "code:OWN-1", "code": "OWN-1", "actors": []string{"Fav"}, "files": []Object{{"missing": false}}})
+	_ = a.put("works", Object{"id": "code:MISSING-2", "code": "MISSING-2", "actors": []string{"Fav"}, "files": []Object{{"missing": true}}})
+	_ = a.put("catalog", Object{"id": "javdb:OWN-1", "source": "javdb", "code": "OWN-1", "actors": []string{"Fav"}, "rating": 4.5})
+	_ = a.put("catalog", Object{"id": "fanza:OWN-1", "source": "fanza", "code": "OWN-1", "actors": []string{"Fav"}, "rating": 4.0})
+	_ = a.put("catalog", Object{"id": "javdb:MISSING-2", "source": "javdb", "code": "MISSING-2", "actors": []string{"Fav"}, "rating": 4.0})
+
+	w := callDiscovery(t, a, http.MethodGet, []string{"recommendations"}, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("recommendation request failed: %d %s", w.Code, w.Body.String())
+	}
+	var recommendations []Object
+	if err := json.Unmarshal(w.Body.Bytes(), &recommendations); err != nil {
+		t.Fatal(err)
+	}
+	if len(recommendations) != 1 {
+		t.Fatalf("recommendations = %#v, want only the catalog entry with unavailable local files", recommendations)
+	}
+	work := toObject(recommendations[0]["work"])
+	if str(work["code"]) != "MISSING-2" {
+		t.Fatalf("recommended work = %#v, want MISSING-2", work)
+	}
+}

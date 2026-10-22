@@ -144,18 +144,39 @@ func TestFileProgressCannotCompleteOtherSegments(t *testing.T) {
 func TestBackupRestoreAtomic(t *testing.T) {
 	a := testApp(t)
 	a.put("works", Object{"id": "one", "title": "Keep"})
+	a.put("actor_profiles", Object{"id": "actor one", "name": "Actor One", "status": "found"})
 	token := login(t, a)
 	w := req(t, a, "GET", "/api/v1/backup", token, nil)
 	var backup Object
 	json.Unmarshal(w.Body.Bytes(), &backup)
+	if _, ok := backup["actor_profiles"]; !ok {
+		t.Fatal("backup omitted actor profiles")
+	}
+	legacyBackup := Object{}
+	for key, value := range backup {
+		if key != "actor_profiles" {
+			legacyBackup[key] = value
+		}
+	}
 	a2 := testApp(t)
-	w = req(t, a2, "POST", "/api/v1/restore", login(t, a2), backup)
+	w = req(t, a2, "POST", "/api/v1/restore", login(t, a2), legacyBackup)
 	if w.Code != 200 {
 		t.Fatal(w.Body.String())
 	}
 	x, e := a2.get("works", "one")
 	if e != nil || str(x["title"]) != "Keep" {
 		t.Fatal(x, e)
+	}
+	if _, e = a2.get("actor_profiles", "actor one"); e == nil {
+		t.Fatal("legacy backup unexpectedly restored an absent actor profile")
+	}
+	a3 := testApp(t)
+	w = req(t, a3, "POST", "/api/v1/restore", login(t, a3), backup)
+	if w.Code != 200 {
+		t.Fatal(w.Body.String())
+	}
+	if profile, e := a3.get("actor_profiles", "actor one"); e != nil || str(profile["name"]) != "Actor One" {
+		t.Fatalf("current backup did not restore actor profile: %#v %v", profile, e)
 	}
 	backup["tools"] = []any{Object{"invalid": true}}
 	w = req(t, a2, "POST", "/api/v1/restore", login(t, a2), backup)

@@ -30,6 +30,10 @@ type App struct {
 	downloadMu sync.Mutex
 	dataDir    string
 	webDir     string
+	// actorProfileAPIBase and actorProfileHTTPClient are test seams. Production
+	// requests use fixed Wikimedia hosts and the configured outbound proxy.
+	actorProfileAPIBase    string
+	actorProfileHTTPClient *http.Client
 }
 
 func str(v any) string       { s, _ := v.(string); return s }
@@ -659,7 +663,7 @@ func (a *App) backup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result := Object{"schema_version": 1, "created_at": now()}
-	for _, kind := range []string{"works", "actor_policies", "catalog", "feeds", "candidates", "settings", "libraries", "tools"} {
+	for _, kind := range []string{"works", "actor_policies", "actor_profiles", "catalog", "feeds", "candidates", "settings", "libraries", "tools"} {
 		v, e := a.listAll(kind)
 		if e != nil {
 			fail(w, 500, e.Error())
@@ -689,8 +693,12 @@ func (a *App) restore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
-	for _, kind := range []string{"works", "actor_policies", "catalog", "feeds", "candidates", "settings", "libraries", "tools"} {
-		arr, ok := o[kind].([]any)
+	for _, kind := range []string{"works", "actor_policies", "actor_profiles", "catalog", "feeds", "candidates", "settings", "libraries", "tools"} {
+		raw, exists := o[kind]
+		if kind == "actor_profiles" && !exists {
+			continue // schema-v1 backups created before actor profiles remain valid.
+		}
+		arr, ok := raw.([]any)
 		if !ok {
 			fail(w, 400, "备份缺少 "+kind)
 			return

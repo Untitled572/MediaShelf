@@ -11,10 +11,10 @@ const icons=source.match(/import \{([^}]+)\} from 'lucide-vue-next'/)[1].split('
 function app(request){
  let token='current-session'
  class ApiError extends Error{constructor(status,message){super(message);this.status=status}}
- const context=vm.createContext({ref,computed,watch(){},onMounted(){},onUnmounted(){},request,ApiError,
+ const context=vm.createContext({URL,ref,computed,watch(){},onMounted(){},onUnmounted(){},request,ApiError,
   currentToken:()=>token,clearToken:()=>{token=''},rememberToken(){},json(){},
   localStorage:{getItem:()=>null},window:{},document:{},...Object.fromEntries(icons.map(n=>[n,()=>{}]))})
- const body=source.replace(/^import .*$/gm,'')+'\nglobalThis.harness={refresh,section,devices,libraries,devicesLoaded,error,selectedDownloaderId,loadDownloader,login,loginMode,password};'
+ const body=source.replace(/^import .*$/gm,'')+'\nglobalThis.harness={refresh,section,devices,libraries,devicesLoaded,error,selectedDownloaderId,loadDownloader,login,loginMode,password,loadRecommendations,visibleRecommendations,visibleActorRecs,nextRecommendationBatch,recommendationsLoaded,recommendationLoading,fileOnline,openListUrl,actorRecs};'
  vm.runInContext(ts.transpileModule(body,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.None}}).outputText,context)
  return context.harness
 }
@@ -29,6 +29,7 @@ test('device results appear while recommendations are still pending',async()=>{
  await tick()
  assert.equal(ui.devicesLoaded.value,true)
  assert.equal(ui.devices.value[0].id,'pc')
+ assert.equal(ui.recommendationLoading.value,true)
  release([]);await refreshing
 })
 
@@ -49,4 +50,36 @@ test('stale download responses cannot overwrite newer selection',async()=>{
  await ui.loadDownloader('new')
  rejectOld(new Error('old login failed'));await old
  assert.equal(ui.error.value,'')
+})
+
+test('recommendations survive background refresh and rotate five works and three actors',async()=>{
+ let release
+ const pending=new Promise(resolve=>release=resolve)
+ const pool=Array.from({length:14},(_,i)=>({work:{id:`work${i}`}}))
+ const actors=Array.from({length:8},(_,i)=>({name:`actor${i}`}))
+ const ui=app(path=>path==='/recommendations'?pending:Promise.resolve(path==='/actor-recommendations'?actors:path==='/recommendation-status'?{}:[]))
+ ui.section.value='discover'
+ const loading=ui.loadRecommendations()
+ await ui.refresh() // A background refresh must not invalidate the separate recommendation request.
+ release(pool);await loading
+ assert.equal(ui.recommendationsLoaded.value,true)
+ assert.equal(ui.visibleRecommendations.value.length,5)
+ assert.equal(ui.visibleActorRecs.value.length,3)
+ const first=ui.visibleRecommendations.value[0].work.id
+ const actor=ui.visibleActorRecs.value[0].name
+ await ui.nextRecommendationBatch()
+ assert.notEqual(ui.visibleRecommendations.value[0].work.id,first)
+ assert.notEqual(ui.visibleActorRecs.value[0].name,actor)
+ assert.equal(new Set(ui.visibleRecommendations.value.map(r=>r.work.id)).size,5)
+})
+
+test('offline files have no playback URL but remain in the database model',()=>{
+ const ui=app(async()=>[])
+ ui.devices.value=[{id:'pc',online:false}]
+ ui.libraries.value=[{id:'media',device_id:'pc',openlist_base:'https://files.example/'}]
+ const file={library_id:'media',device_id:'pc',relative_path:'film.mp4',missing:false}
+ assert.equal(ui.fileOnline(file),false)
+ assert.equal(ui.openListUrl(file),'')
+ ui.devices.value[0].online=true
+ assert.equal(ui.openListUrl(file),'https://files.example/film.mp4')
 })

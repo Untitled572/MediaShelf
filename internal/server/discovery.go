@@ -88,6 +88,17 @@ func (a *App) discovery(w http.ResponseWriter, r *http.Request, p []string) bool
 		}
 		return true
 	}
+	if len(p) == 3 && p[0] == "actors" && p[2] == "profile" {
+		switch r.Method {
+		case http.MethodGet:
+			a.getActorProfile(w, p[1])
+		case http.MethodPost:
+			a.refreshActorProfile(w, r, p[1])
+		default:
+			fail(w, http.StatusMethodNotAllowed, "GET or POST required")
+		}
+		return true
+	}
 	if len(p) == 3 && p[0] == "actors" && p[2] == "aliases" {
 		if r.Method != http.MethodPost {
 			fail(w, http.StatusMethodNotAllowed, "POST required")
@@ -553,8 +564,17 @@ func mergeStrings(a []string, b []string) []string {
 }
 
 func (a *App) preferenceRecommendations(w http.ResponseWriter, actorOnly bool) {
-	works, _ := a.list("works")
-	catalog, _ := a.list("catalog")
+	works, err := a.list("works")
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	ownedCodes := recommendationOwnedCodeIndex(works)
+	catalog, err := a.list("catalog")
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	policies := actorPolicies(a)
 	aliases := aliasMap(policies)
 	actorPreference, tagPreference := preferenceWeights(works, aliases)
@@ -590,7 +610,7 @@ func (a *App) preferenceRecommendations(w http.ResponseWriter, actorOnly bool) {
 				break
 			}
 		}
-		if a.owned(code) || ignored[code] {
+		if ownedCodes.contains(code) || ignored[code] {
 			if sharesKnownActor {
 				for _, name := range actors {
 					canon := canonicalActor(name, aliases)
@@ -721,6 +741,51 @@ func (a *App) preferenceRecommendations(w http.ResponseWriter, actorOnly bool) {
 		}
 	}
 	write(w, http.StatusOK, out)
+}
+
+type recommendationOwnedCodes struct {
+	indexedIDs map[string]bool
+	knownCodes map[string]bool
+	rawCodes   map[string]bool
+}
+
+func recommendationOwnedCodeIndex(works []Object) recommendationOwnedCodes {
+	owned := recommendationOwnedCodes{
+		indexedIDs: make(map[string]bool, len(works)),
+		knownCodes: make(map[string]bool, len(works)),
+		rawCodes:   make(map[string]bool, len(works)),
+	}
+	for _, work := range works {
+		if !hasAvailableWorkFile(work) {
+			continue
+		}
+		code := strings.TrimSpace(str(work["code"]))
+		if code == "" {
+			continue
+		}
+		owned.rawCodes[strings.ToLower(code)] = true
+		if normalized, known := normalizeWorkCode(code); known {
+			owned.knownCodes[normalized] = true
+		}
+		if id := str(work["id"]); id != "" {
+			owned.indexedIDs[id] = true
+		}
+	}
+	return owned
+}
+
+func (owned recommendationOwnedCodes) contains(code string) bool {
+	code = strings.TrimSpace(code)
+	if code == "" {
+		return false
+	}
+	if owned.indexedIDs["code:"+strings.ToUpper(code)] {
+		return true
+	}
+	if normalized, known := normalizeWorkCode(code); known && owned.knownCodes[normalized] {
+		return true
+	}
+	return owned.rawCodes[strings.ToLower(code)]
 }
 
 func mustList(a *App, kind string) []Object {

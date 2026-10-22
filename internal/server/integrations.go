@@ -95,12 +95,14 @@ func (a *App) integrationsAPI(w http.ResponseWriter, r *http.Request, p []string
 	case "catalog":
 		if r.Method == "GET" {
 			xs, _ := a.list("catalog")
+			works, _ := a.list("works")
+			owned := recommendationOwnedCodeIndex(works)
 			out := []Object{}
 			for _, x := range xs {
 				if actor := r.URL.Query().Get("actor"); actor != "" && !contains(x["actors"], actor) && str(x["catalog_actor"]) != actor {
 					continue
 				}
-				x["owned"] = a.owned(str(x["code"]))
+				x["owned"] = owned.contains(str(x["code"]))
 				out = append(out, x)
 			}
 			write(w, 200, out)

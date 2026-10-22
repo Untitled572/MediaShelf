@@ -272,6 +272,7 @@ func (a *App) actorSelection(w http.ResponseWriter, name string) {
 		policy = Object{"name": canonical, "policy": "follow", "target": 2}
 	}
 	localRows, _ := a.list("works")
+	ownedIndex := recommendationOwnedCodeIndex(localRows)
 	local := []Object{}
 	for _, x := range localRows {
 		if hasActor(x, canonical, aliases) {
@@ -299,7 +300,7 @@ func (a *App) actorSelection(w http.ResponseWriter, name string) {
 		}
 	}
 	for _, x := range byCode {
-		if a.owned(str(x["code"])) {
+		if ownedIndex.contains(str(x["code"])) {
 			owned++
 			continue
 		}

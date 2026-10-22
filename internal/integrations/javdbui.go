@@ -41,7 +41,7 @@ type JavDBUIActor struct {
 	AvatarURL   string          `json:"avatar_url,omitempty"`
 	Name        string          `json:"name"`
 	OtherName   string          `json:"other_name,omitempty"`
-	Gender      int             `json:"gender,omitempty"`
+	Gender      *int            `json:"gender,omitempty"`
 	VideosCount int             `json:"videos_count,omitempty"`
 }
 

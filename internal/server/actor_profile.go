@@ -16,14 +16,15 @@ import (
 )
 
 const (
-	actorProfileTimeout      = 12 * time.Second
-	actorProfileBodyLimit    = 1 << 20
-	wikipediaJAEndpoint      = "https://ja.wikipedia.org/w/api.php"
-	wikipediaENEndpoint      = "https://en.wikipedia.org/w/api.php"
-	wikidataAPIEndpoint      = "https://www.wikidata.org/w/api.php"
-	wikipediaJAArticlePrefix = "https://ja.wikipedia.org/wiki/"
-	wikipediaENArticlePrefix = "https://en.wikipedia.org/wiki/"
-	wikidataAdultActorID     = "Q488111"
+	actorProfileTimeout        = 45 * time.Second
+	actorProfileRequestTimeout = 15 * time.Second
+	actorProfileBodyLimit      = 1 << 20
+	wikipediaJAEndpoint        = "https://ja.wikipedia.org/w/api.php"
+	wikipediaENEndpoint        = "https://en.wikipedia.org/w/api.php"
+	wikidataAPIEndpoint        = "https://www.wikidata.org/w/api.php"
+	wikipediaJAArticlePrefix   = "https://ja.wikipedia.org/wiki/"
+	wikipediaENArticlePrefix   = "https://en.wikipedia.org/wiki/"
+	wikidataAdultActorID       = "Q488111"
 )
 
 var (
@@ -92,10 +93,26 @@ func (a *App) refreshActorProfile(w http.ResponseWriter, r *http.Request, reques
 	name, policy := a.resolveActorProfileName(requested)
 	profile, err := a.fetchActorProfile(r.Context(), name, actorNames(policy["aliases"]))
 	if err != nil {
-		fail(w, http.StatusBadGateway, "演员资料刷新失败："+err.Error())
+		message := "演员资料刷新失败：" + err.Error()
+		var network net.Error
+		if (errors.As(err, &network) && network.Timeout()) || errors.Is(err, context.DeadlineExceeded) {
+			message = "演员百科连接超时，已自动重试。请稍后再试或检查设置页代理；已缓存资料仍可查看。"
+		}
+		fail(w, http.StatusBadGateway, message)
 		return
 	}
-	if err := a.put("actor_profiles", profile); err != nil {
+	a.mu.Lock()
+	// Keep a valid translation when refreshing an unchanged public biography.
+	if previous, getErr := a.get("actor_profiles", actorKey(name)); getErr == nil && strings.TrimSpace(str(profile["biography"])) != "" && str(previous["translation_source_hash"]) == digest(strings.TrimSpace(str(profile["biography"]))) {
+		for _, key := range []string{"biography_zh", "description_zh", "translation_provider", "translation_updated_at", "translation_source_url", "translation_source_hash"} {
+			if value, ok := previous[key]; ok {
+				profile[key] = value
+			}
+		}
+	}
+	putErr := a.put("actor_profiles", profile)
+	a.mu.Unlock()
+	if err := putErr; err != nil {
 		fail(w, http.StatusInternalServerError, "演员资料缓存保存失败："+err.Error())
 		return
 	}
@@ -140,6 +157,7 @@ func (a *App) fetchActorProfile(parent context.Context, name string, aliases []s
 	if err != nil {
 		return nil, err
 	}
+	defer client.CloseIdleConnections()
 	values := url.Values{
 		"action": {"query"}, "titles": {name}, "prop": {"extracts|pageprops|pageimages"}, "redirects": {"1"},
 		"exintro": {"1"}, "explaintext": {"1"}, "pithumbsize": {"400"}, "format": {"json"}, "formatversion": {"2"},
@@ -216,6 +234,19 @@ func (a *App) fetchActorProfile(parent context.Context, name string, aliases []s
 		return profile, nil
 	}
 	profile["status"] = "found"
+	profile["gender"] = "unknown"
+	for _, genderID := range wikidataItemIDs(entity, "P21") {
+		if genderID == "Q6581072" {
+			profile["gender"] = "female"
+			profile["gender_source"] = "wikidata"
+			break
+		}
+		if genderID == "Q6581097" {
+			profile["gender"] = "male"
+			profile["gender_source"] = "wikidata"
+			break
+		}
+	}
 	profile["biography"] = strings.TrimSpace(wiki.Extract)
 	description := entity.Descriptions["ja"].Value
 	if description == "" {
@@ -285,7 +316,7 @@ func (a *App) actorProfileClient() (*http.Client, error) {
 	if a.actorProfileAPIBase != "" {
 		return &http.Client{Timeout: actorProfileTimeout}, nil
 	}
-	transport := &http.Transport{TLSHandshakeTimeout: 5 * time.Second, ResponseHeaderTimeout: 7 * time.Second}
+	transport := &http.Transport{TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 10 * time.Second, IdleConnTimeout: 30 * time.Second}
 	proxyURL, err := a.outboundProxy()
 	if err != nil {
 		return nil, err
@@ -296,11 +327,11 @@ func (a *App) actorProfileClient() (*http.Client, error) {
 			return nil, errors.New("global proxy URL is invalid")
 		}
 		transport.Proxy = http.ProxyURL(proxy)
-		transport.DialContext = (&net.Dialer{Timeout: 5 * time.Second}).DialContext
+		transport.DialContext = (&net.Dialer{Timeout: 8 * time.Second}).DialContext
 	} else {
 		transport.DialContext = safeWikimediaDial
 	}
-	return &http.Client{Transport: transport, Timeout: actorProfileTimeout, CheckRedirect: func(req *http.Request, via []*http.Request) error {
+	return &http.Client{Transport: transport, Timeout: actorProfileRequestTimeout, CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 2 || req.URL.Scheme != "https" || len(via) == 0 || !strings.EqualFold(req.URL.Hostname(), via[0].URL.Hostname()) {
 			return errors.New("Wikimedia redirect was rejected")
 		}
@@ -337,7 +368,39 @@ func safeWikimediaDial(ctx context.Context, network, address string) (net.Conn, 
 	return nil, errors.New("Wikimedia API host did not resolve")
 }
 
+type wikimediaHTTPError struct{ status int }
+
+func (e *wikimediaHTTPError) Error() string {
+	return fmt.Sprintf("Wikimedia API returned HTTP %d", e.status)
+}
+func retryableWikimediaError(err error) bool {
+	var response *wikimediaHTTPError
+	if errors.As(err, &response) {
+		return response.status == 429 || response.status == 502 || response.status == 503 || response.status == 504
+	}
+	var network net.Error
+	return (errors.As(err, &network) && network.Timeout()) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+}
 func getWikimediaJSON(ctx context.Context, client *http.Client, endpoint string, values url.Values, out any) error {
+	for attempt := 0; attempt < 2; attempt++ {
+		err := getWikimediaJSONAttempt(ctx, client, endpoint, values, out)
+		if err == nil {
+			return nil
+		}
+		if attempt == 1 || ctx.Err() != nil || !retryableWikimediaError(err) {
+			return err
+		}
+		timer := time.NewTimer(200 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return errors.New("Wikimedia request failed")
+}
+func getWikimediaJSONAttempt(ctx context.Context, client *http.Client, endpoint string, values url.Values, out any) error {
 	requestURL := endpoint + "?" + values.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
 	if err != nil {
@@ -351,7 +414,7 @@ func getWikimediaJSON(ctx context.Context, client *http.Client, endpoint string,
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("Wikimedia API returned HTTP %d", resp.StatusCode)
+		return &wikimediaHTTPError{status: resp.StatusCode}
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, actorProfileBodyLimit+1))
 	if err != nil {

@@ -83,6 +83,7 @@ func TestAliasMergeUpdatesWorksAndCatalogAtomically(t *testing.T) {
 func TestRecommendationsUseNormalizedRatingsSelectiveTargetAndCoactors(t *testing.T) {
 	a := testApp(t)
 	_ = a.put("actor_policies", Object{"id": "Fav", "name": "Fav", "aliases": []string{"F. A."}, "policy": "selective", "target": 1})
+	_ = a.put("actor_profiles", Object{"id": "New Actor", "name": "New Actor", "gender": "female", "gender_source": "wikidata"})
 	_ = a.put("works", Object{"id": "code:OWN-1", "code": "OWN-1", "actors": []string{"F. A."}, "tags": []string{"Solo"}, "rating": 5.0, "files": []Object{{"missing": false}}})
 	_ = a.put("catalog", Object{"id": "javdb:ONE-1", "source": "javdb", "code": "ONE-1", "actors": []string{"Fav", "New Actor"}, "tags": []string{"Solo"}, "rating": 4.8, "source_rating": 4.8})
 	_ = a.put("catalog", Object{"id": "fanza:TWO-2", "source": "fanza", "code": "TWO-2", "actors": []string{"Fav", "New Actor"}, "tags": []string{"Solo"}, "rating": 4.5, "source_rating": 45.0})
@@ -142,5 +143,55 @@ func TestRecommendationsExcludeOwnedDuplicatesButKeepMissingFiles(t *testing.T) 
 	work := toObject(recommendations[0]["work"])
 	if str(work["code"]) != "MISSING-2" {
 		t.Fatalf("recommended work = %#v, want MISSING-2", work)
+	}
+}
+
+func TestActorRecommendationsRequireConfirmedFemaleAndSupplementToThree(t *testing.T) {
+	a := testApp(t)
+	_ = a.put("works", Object{"id": "code:OWN-1", "code": "OWN-1", "actors": []string{"Fav"}, "files": []Object{{"missing": false}}})
+	_ = a.put("actor_policies", Object{"id": "Fav", "name": "Fav", "policy": "follow"})
+	_ = a.put("actor_policies", Object{"id": "Canonical Woman", "name": "Canonical Woman", "aliases": []string{"Woman Alias"}})
+	_ = a.put("actor_profiles", Object{"id": "Canonical Woman", "name": "Canonical Woman", "gender": "female", "gender_source": "wikidata"})
+	_ = a.put("actor_profiles", Object{"id": "Confirmed Male", "name": "Confirmed Male", "gender": "male", "gender_source": "wikidata"})
+	_ = a.put("actor_profiles", Object{"id": "Unknown Actor", "name": "Unknown Actor", "gender": "unknown", "gender_source": "wikidata"})
+	_ = a.put("actor_profiles", Object{"id": "Site Woman 2", "name": "Site Woman 2", "gender": "female", "gender_source": "wikidata"})
+	_ = a.put("actor_profiles", Object{"id": "Site Woman 3", "name": "Site Woman 3", "gender": "female", "gender_source": "wikidata"})
+	_ = a.put("catalog", Object{"id": "javdb:REC-1", "code": "REC-1", "actors": []string{"Fav", "Woman Alias", "Confirmed Male", "Unknown Actor"}})
+	_ = a.put("provider_actor_recommendations", Object{"id": "javdbui", "actors": []Object{
+		{"name": "Woman Alias", "gender": "female", "gender_source": "javdbui", "reason": "站点推荐"},
+		{"name": "Site Woman 2", "gender": "female", "gender_source": "wikidata", "reason": "站点推荐"},
+		{"name": "Site Woman 3", "gender": "female", "gender_source": "wikidata", "reason": "站点推荐"},
+		{"name": "Confirmed Male", "gender": "male", "gender_source": "wikidata"},
+		{"name": "Old Cache Missing Gender"},
+	}})
+
+	w := callDiscovery(t, a, http.MethodGet, []string{"actor-recommendations"}, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("actor recommendations failed: %d %s", w.Code, w.Body.String())
+	}
+	var recommendations []Object
+	if err := json.Unmarshal(w.Body.Bytes(), &recommendations); err != nil {
+		t.Fatal(err)
+	}
+	if len(recommendations) != 3 {
+		t.Fatalf("wanted three confirmed female actor suggestions, got %#v", recommendations)
+	}
+	names := map[string]bool{}
+	for _, actor := range recommendations {
+		name := str(actor["name"])
+		names[name] = true
+		if name == "Confirmed Male" || name == "Unknown Actor" || name == "Old Cache Missing Gender" {
+			t.Fatalf("male or unknown actor was recommended: %#v", recommendations)
+		}
+	}
+	if !names["Canonical Woman"] || !names["Site Woman 2"] || !names["Site Woman 3"] {
+		t.Fatalf("alias resolution or site supplementation failed: %#v", recommendations)
+	}
+}
+
+func TestProviderGenderZeroIsFemaleButOtherOrMissingValuesStayUnknown(t *testing.T) {
+	zero, one := 0, 1
+	if javDBUIActorGender(&zero) != "female" || javDBUIActorGender(&one) != "unknown" || javDBUIActorGender(nil) != "unknown" {
+		t.Fatalf("provider gender mapping guessed an unverified enum: zero=%q one=%q missing=%q", javDBUIActorGender(&zero), javDBUIActorGender(&one), javDBUIActorGender(nil))
 	}
 }

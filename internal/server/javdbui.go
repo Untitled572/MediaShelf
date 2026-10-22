@@ -144,7 +144,8 @@ func (a *App) refreshPublicRecommendations(w http.ResponseWriter, r *http.Reques
 					continue
 				}
 				names[key] = true
-				cards = append(cards, Object{"name": actor.Name, "avatar_url": actor.AvatarURL, "provider_id": actor.ID, "reason": "JavDB UI · " + group.label, "source": "javdbui", "score": 1 - float64(rank)/float64(len(group.items)+1)})
+				gender := javDBUIActorGender(actor.Gender)
+				cards = append(cards, Object{"name": actor.Name, "avatar_url": actor.AvatarURL, "provider_id": actor.ID, "gender": gender, "gender_source": "javdbui", "reason": "JavDB UI · " + group.label, "source": "javdbui", "score": 1 - float64(rank)/float64(len(group.items)+1)})
 			}
 		}
 		if err := a.put("provider_actor_recommendations", Object{"id": "javdbui", "actors": cards, "fetched_at": now()}); err != nil {
@@ -184,4 +185,14 @@ func (a *App) providerActorRecommendations() []Object {
 		}
 	}
 	return out
+}
+
+// JavDBUI's live public actor cards identify known actresses with gender=0.
+// Only that observed value is accepted as female; every other integer or a
+// missing/null field remains unknown until another source confirms it.
+func javDBUIActorGender(raw *int) string {
+	if raw != nil && *raw == 0 {
+		return "female"
+	}
+	return "unknown"
 }

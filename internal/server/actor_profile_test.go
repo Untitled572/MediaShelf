@@ -85,6 +85,20 @@ func TestActorProfileRefreshUsesExactCanonicalNameAndCachesForOfflineGET(t *test
 		t.Fatalf("cached GET made outbound requests: status=%d requests=%d", cached.Code, wikipediaRequests+wikidataRequests)
 	}
 
+	profile["biography_zh"] = "已缓存中文简介"
+	profile["translation_source_hash"] = digest(strings.TrimSpace(str(profile["biography"])))
+	profile["translation_provider"] = "mymemory"
+	if err := a.put("actor_profiles", profile); err != nil {
+		t.Fatal(err)
+	}
+	unchanged := req(t, a, http.MethodPost, "/api/v1/actors/Alice%20Example/profile", token, nil)
+	if unchanged.Code != http.StatusOK {
+		t.Fatal(unchanged.Body.String())
+	}
+	if err := json.Unmarshal(unchanged.Body.Bytes(), &profile); err != nil || str(profile["biography_zh"]) != "已缓存中文简介" {
+		t.Fatalf("unchanged refresh discarded cached translation: %v %v", profile, err)
+	}
+
 	failWikidata = true
 	failedRefresh := req(t, a, http.MethodPost, "/api/v1/actors/Alice%20Example/profile", token, nil)
 	if failedRefresh.Code != http.StatusBadGateway {

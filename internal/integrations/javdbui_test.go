@@ -162,3 +162,17 @@ func TestJavDBUIActorRecommendationAcceptsNumericType(t *testing.T) {
 		t.Fatal(result)
 	}
 }
+
+func TestJavDBUIActorGenderPreservesMissingAndZeroValues(t *testing.T) {
+	client := javDBUITestClient(t, func(req *http.Request) (*http.Response, error) {
+		return javDBUIJSONResponse(req, 200, `{"success":1,"data":{"new_actors":[{"id":"female","name":"Female","gender":0},{"id":"male","name":"Male","gender":1},{"id":"null","name":"Null","gender":null},{"id":"missing","name":"Missing"}],"monthly_actors":[],"recommend_actors":[]}}`)
+	})
+	result, err := client.RecommendedActors(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	actors := result.NewActors
+	if len(actors) != 4 || actors[0].Gender == nil || *actors[0].Gender != 0 || actors[1].Gender == nil || *actors[1].Gender != 1 || actors[2].Gender != nil || actors[3].Gender != nil {
+		t.Fatalf("gender presence was not preserved: %#v", actors)
+	}
+}

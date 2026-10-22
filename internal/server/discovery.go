@@ -103,6 +103,14 @@ func (a *App) discovery(w http.ResponseWriter, r *http.Request, p []string) bool
 		}
 		return true
 	}
+	if len(p) == 4 && p[0] == "actors" && p[2] == "profile" && p[3] == "translate" {
+		if r.Method != http.MethodPost {
+			fail(w, http.StatusMethodNotAllowed, "POST required")
+		} else {
+			a.translateActorProfile(w, r, p[1])
+		}
+		return true
+	}
 	if len(p) == 3 && p[0] == "actors" && p[2] == "aliases" {
 		if r.Method != http.MethodPost {
 			fail(w, http.StatusMethodNotAllowed, "POST required")
@@ -697,6 +705,7 @@ func (a *App) preferenceRecommendations(w http.ResponseWriter, actorOnly bool) {
 	}
 	if actorOnly {
 		out := []Object{}
+		genders := a.actorGenderIndex(aliases)
 		canonicalNames := map[string]string{}
 		for _, x := range catalog {
 			for _, n := range actorNames(x["actors"]) {
@@ -707,16 +716,31 @@ func (a *App) preferenceRecommendations(w http.ResponseWriter, actorOnly bool) {
 			}
 		}
 		for k, score := range coactors {
-			if n := canonicalNames[k]; n != "" {
+			if n := canonicalNames[k]; n != "" && genders[actorKey(n)] == "female" {
 				out = append(out, Object{"name": n, "score": score, "reason": "與收藏偏好演員共同出現在目錄作品中", "shared_works": len(coactorWorks[k])})
 			}
 		}
 		sort.Slice(out, func(i, j int) bool { return num(out[i]["score"]) > num(out[j]["score"]) })
+		if len(out) < 3 {
+			selected := map[string]bool{}
+			for _, item := range out {
+				selected[actorKey(str(item["name"]))] = true
+			}
+			for _, actor := range a.providerActorRecommendations() {
+				name := canonicalActor(str(actor["name"]), aliases)
+				key := actorKey(name)
+				if name == "" || selected[key] || genders[key] != "female" {
+					continue
+				}
+				selected[key] = true
+				out = append(out, Object{"name": name, "score": num(actor["score"]), "reason": str(actor["reason"])})
+				if len(out) == 3 {
+					break
+				}
+			}
+		}
 		if len(out) > 100 {
 			out = out[:100]
-		}
-		if len(out) == 0 {
-			out = a.providerActorRecommendations()
 		}
 		write(w, http.StatusOK, out)
 		return
@@ -759,6 +783,60 @@ func (a *App) preferenceRecommendations(w http.ResponseWriter, actorOnly bool) {
 		}
 	}
 	write(w, http.StatusOK, out)
+}
+
+func (a *App) actorGenderIndex(aliases map[string]string) map[string]string {
+	evidence := map[string]map[string]bool{}
+	add := func(rawName, gender string) {
+		name := canonicalActor(rawName, aliases)
+		key := actorKey(name)
+		gender = normalizeActorGender(gender)
+		if key == "" || (gender != "female" && gender != "male") {
+			return
+		}
+		if evidence[key] == nil {
+			evidence[key] = map[string]bool{}
+		}
+		evidence[key][gender] = true
+	}
+	for _, profile := range mustList(a, "actor_profiles") {
+		if str(profile["gender_source"]) == "wikidata" {
+			add(str(profile["name"]), str(profile["gender"]))
+		}
+	}
+	for _, policy := range mustList(a, "actor_policies") {
+		add(str(policy["name"]), str(policy["gender"]))
+	}
+	if cached, err := a.get("provider_actor_recommendations", "javdbui"); err == nil {
+		for _, actor := range asObjects(cached["actors"]) {
+			if str(actor["gender_source"]) == "javdbui" {
+				add(str(actor["name"]), str(actor["gender"]))
+			}
+		}
+	}
+	out := map[string]string{}
+	for key, genders := range evidence {
+		switch {
+		case genders["female"] && !genders["male"]:
+			out[key] = "female"
+		case genders["male"] && !genders["female"]:
+			out[key] = "male"
+		default:
+			out[key] = "unknown"
+		}
+	}
+	return out
+}
+
+func normalizeActorGender(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "female":
+		return "female"
+	case "male":
+		return "male"
+	default:
+		return "unknown"
+	}
 }
 
 type recommendationOwnedCodes struct {

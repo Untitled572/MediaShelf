@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"mediashelf/internal/integrations"
 	"net/http"
 	"net/url"
@@ -17,6 +16,9 @@ func toObject(v any) Object {
 	b, _ := json.Marshal(v)
 	o := Object{}
 	_ = json.Unmarshal(b, &o)
+	if o == nil {
+		o = Object{}
+	}
 	return o
 }
 func (a *App) integrationsAPI(w http.ResponseWriter, r *http.Request, p []string) {
@@ -112,6 +114,7 @@ func (a *App) integrationsAPI(w http.ResponseWriter, r *http.Request, p []string
 		if r.Method == "GET" {
 			xs, _ := a.list("sources")
 			for _, x := range xs {
+				x["cookie_configured"] = str(x["cookie"]) != ""
 				delete(x, "cookie")
 			}
 			write(w, 200, xs)
@@ -122,12 +125,29 @@ func (a *App) integrationsAPI(w http.ResponseWriter, r *http.Request, p []string
 			if !ok {
 				return
 			}
+			if proxy := str(o["proxy_url"]); proxy != "" {
+				u, e := url.Parse(proxy)
+				if e != nil || u.Host == "" || u.User != nil {
+					fail(w, 400, "代理 URL 不支持内嵌凭据，请使用本机代理端口")
+					return
+				}
+			}
 			o["id"] = str(o["source"])
+			if _, present := o["cookie"]; !present {
+				old, _ := a.get("sources", str(o["id"]))
+				o["cookie"] = old["cookie"]
+			}
 			if str(o["id"]) == "" {
 				fail(w, 400, "需要来源名称")
 				return
 			}
-			a.saveResponse(w, "sources", o)
+			if e := a.put("sources", o); e != nil {
+				fail(w, 500, e.Error())
+				return
+			}
+			o["cookie_configured"] = str(o["cookie"]) != ""
+			delete(o, "cookie")
+			write(w, 200, o)
 			return
 		}
 		fail(w, 405, "Method not allowed")
@@ -138,14 +158,33 @@ func (a *App) integrationsAPI(w http.ResponseWriter, r *http.Request, p []string
 	}
 }
 func (a *App) owned(code string) bool {
+	code = strings.TrimSpace(code)
 	if code == "" {
 		return false
 	}
-	w, e := a.get("works", "code:"+strings.ToUpper(code))
+	// Preserve the common-case indexed lookup. The full scan below is needed
+	// only when the submitted spelling differs from the stored work ID or its
+	// exact record has no available files.
+	if w, e := a.get("works", "code:"+strings.ToUpper(code)); e == nil && hasAvailableWorkFile(w) {
+		return true
+	}
+	works, e := a.list("works")
 	if e != nil {
 		return false
 	}
-	for _, f := range asObjects(w["files"]) {
+	for _, w := range works {
+		if !sameWorkCode(str(w["code"]), code) {
+			continue
+		}
+		if hasAvailableWorkFile(w) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasAvailableWorkFile(work Object) bool {
+	for _, f := range asObjects(work["files"]) {
 		if !flag(f["missing"]) {
 			return true
 		}
@@ -157,6 +196,7 @@ func (a *App) downloadersAPI(w http.ResponseWriter, r *http.Request, p []string)
 		if r.Method == "GET" {
 			xs, _ := a.list("downloaders")
 			for _, x := range xs {
+				x["password_configured"] = str(x["password"]) != ""
 				delete(x, "password")
 			}
 			write(w, 200, xs)
@@ -197,7 +237,7 @@ func (a *App) downloadersAPI(w http.ResponseWriter, r *http.Request, p []string)
 	}
 	op := p[2]
 	params := Object{}
-	if op != "torrents" {
+	if op != "torrents" && op != "categories" {
 		if r.Method != "POST" {
 			fail(w, 405, "POST required")
 			return
@@ -211,6 +251,19 @@ func (a *App) downloadersAPI(w http.ResponseWriter, r *http.Request, p []string)
 	if op == "add" && a.owned(str(params["code"])) && !flag(params["allow_existing"]) {
 		fail(w, 409, "本地已有此作品，请先检查版本")
 		return
+	}
+	if op == "add" {
+		a.downloadMu.Lock()
+		defer a.downloadMu.Unlock()
+		ts, err := a.qbit(r.Context(), d, "torrents", Object{})
+		if err != nil {
+			fail(w, 502, "查重失败："+err.Error())
+			return
+		}
+		if queueDuplicate(ts, str(params["url"]), str(params["code"])) {
+			fail(w, 409, "下载队列已有相同作品或种子")
+			return
+		}
 	}
 	result, e := a.qbit(r.Context(), d, op, params)
 	if e != nil {
@@ -232,6 +285,18 @@ func (a *App) qbit(ctx context.Context, d Object, op string, params Object) (any
 	if flag(params["delete_files"]) {
 		return nil, fmt.Errorf("仅支持删除任务并保留数据文件")
 	}
+	if op == "add" {
+		if str(d["management_mode"]) == "categorical" {
+			if str(params["category"]) == "" {
+				return nil, fmt.Errorf("本机自动管理模式需要选择分类")
+			}
+			params["auto_tmm"] = true
+			delete(params, "save_path")
+		} else {
+			params["category"] = ""
+			params["auto_tmm"] = false
+		}
+	}
 	if device := str(d["device_id"]); device != "" {
 		return a.remoteQbit(ctx, d, op, params)
 	}
@@ -245,8 +310,10 @@ func (a *App) qbit(ctx context.Context, d Object, op string, params Object) (any
 	switch op {
 	case "torrents":
 		return q.ListTorrents(ctx, "")
+	case "categories":
+		return q.ListCategories(ctx)
 	case "add":
-		e = q.Add(ctx, integrations.AddTorrent{URL: str(params["url"]), SavePath: str(params["save_path"]), Category: str(params["category"]), Tags: str(params["tags"]), Paused: false})
+		e = q.Add(ctx, integrations.AddTorrent{URL: str(params["url"]), SavePath: str(params["save_path"]), Category: str(params["category"]), Tags: str(params["tags"]), Paused: false, AutoTMM: boolPointer(params["auto_tmm"])})
 	case "action":
 		hashes := stringSlice(params["hashes"])
 		if len(hashes) == 0 {
@@ -320,36 +387,17 @@ func (a *App) refreshFeed(w http.ResponseWriter, r *http.Request, key string) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
 	defer cancel()
-	req, e := http.NewRequestWithContext(ctx, "GET", str(f["url"]), nil)
-	if e != nil {
-		fail(w, 400, e.Error())
-		return
-	}
-	client := &http.Client{Timeout: 25 * time.Second}
-	resp, e := client.Do(req)
-	if e != nil {
-		fail(w, 502, e.Error())
-		return
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		fail(w, 502, fmt.Sprintf("订阅返回 HTTP %d", resp.StatusCode))
-		return
-	}
-	b, e := io.ReadAll(io.LimitReader(resp.Body, (8<<20)+1))
-	if e != nil || len(b) > 8<<20 {
-		fail(w, 502, "订阅响应过大或读取失败")
-		return
-	}
 	rules := integrations.FeedRules{}
-	if s := str(f["include"]); s != "" {
-		rules.Include = []string{s}
+	if x := str(f["include"]); x != "" {
+		rules.Include = []string{x}
 	}
-	if s := str(f["exclude"]); s != "" {
-		rules.Exclude = []string{s}
+	if x := str(f["exclude"]); x != "" {
+		rules.Exclude = []string{x}
 	}
-	items, e := integrations.ParseFeed(b, rules)
+	items, e := integrations.FetchFeed(ctx, str(f["url"]), rules)
 	if e != nil {
+		f["last_error"] = e.Error()
+		_ = a.put("feeds", f)
 		fail(w, 502, e.Error())
 		return
 	}
@@ -376,10 +424,10 @@ func (a *App) downloadCandidate(w http.ResponseWriter, r *http.Request, c Object
 	if !ok {
 		return
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.downloadMu.Lock()
+	defer a.downloadMu.Unlock()
 	latest, _ := a.get("candidates", str(c["id"]))
-	if str(latest["status"]) == "submitted" || str(latest["status"]) == "submitting" {
+	if str(latest["status"]) == "submitted" || str(latest["status"]) == "submitting" || str(latest["status"]) == "uncertain" {
 		fail(w, 409, "候选已提交，请检查下载队列")
 		return
 	}
@@ -390,6 +438,15 @@ func (a *App) downloadCandidate(w http.ResponseWriter, r *http.Request, c Object
 	d, e := a.get("downloaders", str(o["downloader_id"]))
 	if e != nil {
 		fail(w, 400, "下载器不存在")
+		return
+	}
+	ts, err := a.qbit(r.Context(), d, "torrents", Object{})
+	if err != nil {
+		fail(w, 502, "查重失败："+err.Error())
+		return
+	}
+	if queueDuplicate(ts, str(c["url"]), str(c["code"])) {
+		fail(w, 409, "下载队列已有相同作品或种子")
 		return
 	}
 	c["status"] = "submitting"
@@ -433,8 +490,10 @@ func (a *App) syncCatalog(w http.ResponseWriter, r *http.Request) {
 	}
 	status := Object{"id": source + ":" + actor, "actor": actor, "source": source, "complete": false, "last_sync": now(), "count": 0}
 	count := 0
+	target := actor
+	visited := map[string]bool{}
 	for page := 1; page <= 50; page++ {
-		result, err := client.Catalog(r.Context(), actor, page)
+		result, err := client.Catalog(r.Context(), target, 1)
 		if err != nil {
 			status["error"] = err.Error()
 			_ = a.put("catalog_syncs", status)
@@ -465,6 +524,12 @@ func (a *App) syncCatalog(w http.ResponseWriter, r *http.Request) {
 			status["complete"] = result.Complete
 			break
 		}
+		if result.NextURL == "" || visited[result.NextURL] {
+			status["error"] = "分页链接缺失或重复，目录未完成"
+			break
+		}
+		visited[result.NextURL] = true
+		target = result.NextURL
 		select {
 		case <-r.Context().Done():
 			fail(w, 408, "同步取消")
@@ -524,10 +589,10 @@ func (a *App) recommend(w http.ResponseWriter, kind string) {
 				reasons = append(reasons, "偏好标签："+s)
 			}
 		}
-		rating := num(x["source_rating"])
+		rating := num(x["rating"])
 		if rating > 0 {
 			score += rating * 0.3
-			reasons = append(reasons, fmt.Sprintf("来源评分 %.1f", rating))
+			reasons = append(reasons, fmt.Sprintf("来源折算评分 %.1f/5", rating))
 		}
 		if len(reasons) == 0 {
 			reasons = append(reasons, "关注演员目录中的未收藏作品")
@@ -550,4 +615,12 @@ func (a *App) recommend(w http.ResponseWriter, kind string) {
 		out = out[:100]
 	}
 	write(w, 200, out)
+}
+
+func boolPointer(v any) *bool {
+	b, ok := v.(bool)
+	if !ok {
+		return nil
+	}
+	return &b
 }

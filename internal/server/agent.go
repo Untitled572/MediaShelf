@@ -158,6 +158,53 @@ func (a *App) agentAPI(w http.ResponseWriter, r *http.Request) {
 func defaultProgress() Object {
 	return Object{"compression": "pending", "cutting": "pending", "translation": "pending", "verified": false}
 }
+
+func hasNFOQuality(work Object) bool {
+	if nfo, ok := work["has_nfo"].(bool); ok {
+		return nfo
+	}
+	// Older agents do not send has_nfo. Infer NFO-backed metadata from fields
+	// that the filename-only fallback cannot produce.
+	if year := num(work["year"]); year > 0 {
+		return true
+	}
+	if len(asObjects(work["actors"])) > 0 || len(asObjects(work["tags"])) > 0 {
+		return true
+	}
+	if work["source_rating"] != nil || str(work["source_url"]) != "" {
+		return true
+	}
+	return false
+}
+
+func scanFieldHasValue(work Object, key string) bool {
+	switch key {
+	case "title", "source_url", "kind":
+		return strings.TrimSpace(str(work[key])) != ""
+	case "year":
+		return num(work[key]) > 0
+	case "actors", "tags":
+		return len(asObjects(work[key])) > 0 || len(stringSlice(work[key])) > 0
+	case "source_rating":
+		return work[key] != nil
+	default:
+		return work[key] != nil
+	}
+}
+
+func useIncomingScanField(incoming Object, key string, incomingHasNFO bool, existing Object, existingHasNFO bool) bool {
+	if !scanFieldHasValue(incoming, key) {
+		return false
+	}
+	if key == "kind" {
+		return true
+	}
+	if key == "title" {
+		return incomingHasNFO || !existingHasNFO || !scanFieldHasValue(existing, key)
+	}
+	return incomingHasNFO || !scanFieldHasValue(existing, key)
+}
+
 func asObjects(v any) []Object {
 	b, _ := json.Marshal(v)
 	out := []Object{}
@@ -205,12 +252,22 @@ func (a *App) importScan(w http.ResponseWriter, dev string, o Object) {
 			workID = "file:" + digest(dev+"|"+lib+"|"+str(files[0]["relative_path"]))
 		}
 		existing := byKey[workID]
+		incomingHasNFO := hasNFOQuality(incoming)
 		if existing == nil {
-			existing = Object{"id": workID, "code": code, "title": incoming["title"], "year": incoming["year"], "actors": incoming["actors"], "tags": incoming["tags"], "rating": nil, "source_rating": incoming["source_rating"], "source_url": incoming["source_url"], "kind": incoming["kind"], "collection_status": "owned", "progress": defaultProgress(), "files": []Object{}}
+			existing = Object{"id": workID, "code": code, "title": incoming["title"], "year": incoming["year"], "actors": incoming["actors"], "tags": incoming["tags"], "rating": nil, "source_rating": incoming["source_rating"], "source_url": incoming["source_url"], "kind": incoming["kind"], "collection_status": "owned", "progress": defaultProgress(), "files": []Object{}, "has_nfo": incomingHasNFO}
 		}
-		if str(incoming["cover_url"]) != "" {
+		manual := toObject(existing["manual_fields"])
+		existingHasNFO := hasNFOQuality(existing)
+		for _, k := range []string{"title", "year", "actors", "tags", "source_rating", "source_url", "kind"} {
+			if flag(manual[k]) || !useIncomingScanField(incoming, k, incomingHasNFO, existing, existingHasNFO) {
+				continue
+			}
+			existing[k] = incoming[k]
+		}
+		if !flag(manual["cover_url"]) && str(incoming["cover_url"]) != "" && (incomingHasNFO || !existingHasNFO || str(existing["cover_url"]) == "") {
 			existing["cover_url"] = incoming["cover_url"]
 		}
+		existing["has_nfo"] = existingHasNFO || incomingHasNFO
 		efs := asObjects(existing["files"])
 		for _, f := range files {
 			rel := str(f["relative_path"])
@@ -268,6 +325,7 @@ func (a *App) importScan(w http.ResponseWriter, dev string, o Object) {
 	}
 	defer tx.Rollback()
 	for _, x := range updates {
+		x["progress"] = aggregateProgress(asObjects(x["files"]))
 		b, _ := json.Marshal(x)
 		if _, e = tx.Exec("INSERT INTO documents(kind,id,body) VALUES('works',?,?) ON CONFLICT(kind,id) DO UPDATE SET body=excluded.body", x["id"], string(b)); e != nil {
 			fail(w, 500, e.Error())

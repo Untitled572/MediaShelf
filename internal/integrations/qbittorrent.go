@@ -2,6 +2,8 @@ package integrations
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +13,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -34,6 +37,7 @@ type Torrent struct {
 	Category string  `json:"category"`
 	Tags     string  `json:"tags"`
 	SavePath string  `json:"save_path"`
+	AutoTMM  bool    `json:"auto_tmm"`
 	AddedOn  int64   `json:"added_on"`
 	DLSpeed  int64   `json:"dlspeed"`
 	UPSpeed  int64   `json:"upspeed"`
@@ -42,7 +46,22 @@ type Torrent struct {
 type AddTorrent struct {
 	URL, SavePath, Category, Tags string
 	Paused                        bool
+	AutoTMM                       *bool
 }
+
+type Category struct {
+	Name     string `json:"name"`
+	SavePath string `json:"savePath"`
+}
+
+var errResponseTooLarge = errors.New("response exceeds 4 MiB limit")
+
+const qbLoginFailureCooldown = 5 * time.Minute
+
+var qbLoginFailures = struct {
+	sync.Mutex
+	entries map[string]time.Time
+}{entries: make(map[string]time.Time)}
 
 func NewQBittorrent(c QBConfig) (*QBittorrent, error) {
 	u, err := url.Parse(strings.TrimRight(strings.TrimSpace(c.URL), "/"))
@@ -67,6 +86,9 @@ func (q *QBittorrent) request(ctx context.Context, method, path string, values u
 		return err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	origin := req.URL.Scheme + "://" + req.URL.Host
+	req.Header.Set("Origin", origin)
+	req.Header.Set("Referer", origin+"/")
 	resp, err := q.client.Do(req)
 	if err != nil {
 		return err
@@ -81,7 +103,9 @@ func (q *QBittorrent) request(ctx context.Context, method, path string, values u
 			return err
 		}
 		status := strings.TrimSpace(string(b))
-		if status != "Ok." {
+		// qBittorrent 5.3 may return HTTP 200 with an empty body while still
+		// establishing the session cookie. Login validates it with app/version.
+		if status != "" && status != "Ok." {
 			return fmt.Errorf("qBittorrent login failed: %s", status)
 		}
 		return nil
@@ -94,7 +118,7 @@ func (q *QBittorrent) request(ctx context.Context, method, path string, values u
 		return err
 	}
 	if len(b) > 4<<20 {
-		return errors.New("response exceeds 4 MiB limit")
+		return errResponseTooLarge
 	}
 	if text, ok := out.(*string); ok {
 		*text = strings.TrimSpace(string(b))
@@ -104,15 +128,72 @@ func (q *QBittorrent) request(ctx context.Context, method, path string, values u
 }
 
 func (q *QBittorrent) Login(ctx context.Context) error {
-	if err := q.request(ctx, http.MethodPost, "auth/login", url.Values{"username": {q.username}, "password": {q.password}}, nil); err != nil {
+	// qBittorrent can be configured with WebUI authentication disabled. Probe
+	// the unauthenticated version endpoint when no credentials were supplied so
+	// read-only local/LAN endpoints can still be listed.
+	if q.username == "" && q.password == "" {
+		if _, err := q.Version(ctx); err == nil {
+			return nil
+		} else {
+			return fmt.Errorf("qBittorrent credentials are required: anonymous version probe failed (%w)", err)
+		}
+	}
+	key := q.loginFailureKey()
+	if authFailureCoolingDown(key, time.Now()) {
+		return errors.New("qBittorrent login temporarily suppressed after a recent authentication failure")
+	}
+	err := q.request(ctx, http.MethodPost, "auth/login", url.Values{"username": {q.username}, "password": {q.password}}, nil)
+	var v string
+	if err == nil {
+		err = q.request(ctx, http.MethodGet, "app/version", nil, &v)
+		if err != nil {
+			err = fmt.Errorf("login succeeded but version query failed: %w", err)
+		}
+	}
+	if err != nil {
+		cacheAuthFailure(key, time.Now().Add(qbLoginFailureCooldown))
 		return err
 	}
-	var v string
-	if err := q.request(ctx, http.MethodGet, "app/version", nil, &v); err != nil {
-		return fmt.Errorf("login succeeded but version query failed: %w", err)
-	}
 	q.version = strings.TrimSpace(v)
+	clearAuthFailure(key)
 	return nil
+}
+
+func (q *QBittorrent) loginFailureKey() string {
+	sum := sha256.Sum256([]byte(q.base + "\x00" + q.username + "\x00" + q.password))
+	return hex.EncodeToString(sum[:])
+}
+
+func authFailureCoolingDown(key string, now time.Time) bool {
+	qbLoginFailures.Lock()
+	defer qbLoginFailures.Unlock()
+	until, ok := qbLoginFailures.entries[key]
+	if !ok {
+		return false
+	}
+	if !now.Before(until) {
+		delete(qbLoginFailures.entries, key)
+		return false
+	}
+	return true
+}
+
+func cacheAuthFailure(key string, until time.Time) {
+	qbLoginFailures.Lock()
+	defer qbLoginFailures.Unlock()
+	now := time.Now()
+	for k, expiry := range qbLoginFailures.entries {
+		if !now.Before(expiry) {
+			delete(qbLoginFailures.entries, k)
+		}
+	}
+	qbLoginFailures.entries[key] = until
+}
+
+func clearAuthFailure(key string) {
+	qbLoginFailures.Lock()
+	delete(qbLoginFailures.entries, key)
+	qbLoginFailures.Unlock()
 }
 func (q *QBittorrent) Version(ctx context.Context) (string, error) {
 	var v string
@@ -140,18 +221,59 @@ func (q *QBittorrent) apiVersion(ctx context.Context) (int, error) {
 	return major*100 + minor, nil
 }
 func (q *QBittorrent) ListTorrents(ctx context.Context, category string) ([]Torrent, error) {
-	v := url.Values{}
-	if category != "" {
-		v.Set("category", category)
+	const initialPageSize = 250
+	const maxTorrents = 50000
+	all := make([]Torrent, 0)
+	offset, pageSize := 0, initialPageSize
+	for offset < maxTorrents {
+		v := url.Values{}
+		v.Set("limit", strconv.Itoa(pageSize))
+		v.Set("offset", strconv.Itoa(offset))
+		v.Set("sort", "hash")
+		v.Set("reverse", "false")
+		if category != "" {
+			v.Set("category", category)
+		}
+		var page []Torrent
+		if err := q.request(ctx, http.MethodGet, "torrents/info?"+v.Encode(), nil, &page); err != nil {
+			if errors.Is(err, errResponseTooLarge) {
+				if pageSize == 1 {
+					return nil, errors.New("qBittorrent returned more than 4 MiB for one torrent; cannot list safely")
+				}
+				pageSize /= 2
+				continue
+			}
+			return nil, err
+		}
+		all = append(all, page...)
+		offset += len(page)
+		if len(page) < pageSize {
+			return all, nil
+		}
 	}
-	var a []Torrent
-	err := q.request(ctx, http.MethodGet, "torrents/info?"+v.Encode(), nil, &a)
-	return a, err
+	return nil, fmt.Errorf("qBittorrent torrent list exceeds the %d-item safety limit", maxTorrents)
 }
+
+func (q *QBittorrent) ListCategories(ctx context.Context) (map[string]Category, error) {
+	var categories map[string]Category
+	if err := q.request(ctx, http.MethodGet, "torrents/categories", nil, &categories); err != nil {
+		return nil, err
+	}
+	if categories == nil {
+		categories = map[string]Category{}
+	}
+	return categories, nil
+}
+
 func (q *QBittorrent) Add(ctx context.Context, a AddTorrent) error {
 	v := url.Values{"urls": {a.URL}}
-	if a.SavePath != "" {
-		v.Set("savepath", a.SavePath)
+	if a.AutoTMM == nil || !*a.AutoTMM {
+		if a.SavePath != "" {
+			v.Set("savepath", a.SavePath)
+		}
+	}
+	if a.AutoTMM != nil {
+		v.Set("autoTMM", strconv.FormatBool(*a.AutoTMM))
 	}
 	if a.Category != "" {
 		v.Set("category", a.Category)
@@ -162,7 +284,14 @@ func (q *QBittorrent) Add(ctx context.Context, a AddTorrent) error {
 	if a.Paused {
 		v.Set("paused", "true")
 	}
-	return q.request(ctx, http.MethodPost, "torrents/add", v, nil)
+	var status string
+	if err := q.request(ctx, http.MethodPost, "torrents/add", v, &status); err != nil {
+		return err
+	}
+	if status != "" && status != "Ok." {
+		return fmt.Errorf("qBittorrent add failed: %s", status)
+	}
+	return nil
 }
 func hashesValue(h []string) (string, error) {
 	if len(h) == 0 {

@@ -55,35 +55,7 @@ func (a *App) fileProgress(w http.ResponseWriter, r *http.Request, workID, fileI
 		return
 	}
 	work["files"] = fs
-	aggregate := defaultProgress()
-	verified := true
-	for _, k := range []string{"compression", "cutting", "translation"} {
-		done := true
-		active := false
-		for _, f := range fs {
-			if flag(f["missing"]) {
-				continue
-			}
-			p := toObject(f["progress"])
-			s := str(p[k])
-			if s != "done" && s != "not_needed" {
-				done = false
-			}
-			if s == "in_progress" {
-				active = true
-			}
-			if !flag(p["verified"]) {
-				verified = false
-			}
-		}
-		if done {
-			aggregate[k] = "done"
-		} else if active {
-			aggregate[k] = "in_progress"
-		}
-	}
-	aggregate["verified"] = verified
-	work["progress"] = aggregate
+	work["progress"] = aggregateProgress(fs)
 	a.saveResponse(w, "works", work)
 }
 func redactJob(j Object) Object {
@@ -122,4 +94,47 @@ func decodeObject(s string) Object {
 		return nil
 	}
 	return o
+}
+
+// Importing a new copy cannot inherit a previous version's verification.
+func aggregateProgress(files []Object) Object {
+	result := defaultProgress()
+	available := []Object{}
+	for _, f := range files {
+		if !flag(f["missing"]) {
+			available = append(available, f)
+		}
+	}
+	if len(available) == 0 {
+		return result
+	}
+	verified := true
+	for _, k := range []string{"compression", "cutting", "translation"} {
+		done, active, notNeeded := true, false, true
+		for _, f := range available {
+			p := toObject(f["progress"])
+			state := str(p[k])
+			if state != "done" && state != "not_needed" {
+				done = false
+			}
+			if state != "not_needed" {
+				notNeeded = false
+			}
+			if state == "in_progress" {
+				active = true
+			}
+			if !flag(p["verified"]) {
+				verified = false
+			}
+		}
+		if notNeeded {
+			result[k] = "not_needed"
+		} else if done {
+			result[k] = "done"
+		} else if active {
+			result[k] = "in_progress"
+		}
+	}
+	result["verified"] = verified
+	return result
 }

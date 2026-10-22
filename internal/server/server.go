@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -23,13 +24,14 @@ import (
 
 type Object map[string]any
 type App struct {
-	db       *sql.DB
-	password string
-	sessions map[string]time.Time
-	mu       sync.Mutex
-	scanMu   sync.Mutex
-	dataDir  string
-	webDir   string
+	db         *sql.DB
+	password   string
+	sessions   map[string]time.Time
+	mu         sync.Mutex
+	scanMu     sync.Mutex
+	downloadMu sync.Mutex
+	dataDir    string
+	webDir     string
 }
 
 func str(v any) string       { s, _ := v.(string); return s }
@@ -69,6 +71,9 @@ func Run() error {
 	}
 	defer a.db.Close()
 	addr := env("MEDIASHELF_ADDR", "127.0.0.1:8765")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go a.Background(ctx)
 	log.Printf("MediaShelf listening on %s", addr)
 	s := &http.Server{Addr: addr, Handler: a.Handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
 	return s.ListenAndServe()
@@ -213,6 +218,9 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 }
 func (a *App) api(w http.ResponseWriter, r *http.Request) {
 	p := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/"), "/"), "/")
+	if a.discovery(w, r, p) {
+		return
+	}
 	kind := p[0]
 	key := ""
 	if len(p) > 1 {
@@ -441,10 +449,22 @@ func (a *App) worksAPI(w http.ResponseWriter, r *http.Request, key string) {
 			}
 		}
 	}
+	manual := toObject(o["manual_fields"])
 	for _, k := range []string{"rating", "progress", "title", "actors", "tags", "collection_status"} {
 		if v, ok := patch[k]; ok {
 			o[k] = v
+			manual[k] = true
 		}
+	}
+	o["manual_fields"] = manual
+	if pr, ok := patch["progress"]; ok {
+		fs := asObjects(o["files"])
+		for _, f := range fs {
+			if !flag(f["missing"]) {
+				f["progress"] = pr
+			}
+		}
+		o["files"] = fs
 	}
 	a.saveResponse(w, "works", o)
 }
@@ -496,6 +516,13 @@ func (a *App) actorsAPI(w http.ResponseWriter, r *http.Request, key string) {
 		_ = json.Unmarshal(b, &names)
 		for _, s := range names {
 			actors[s]++
+		}
+	}
+	policies, _ := a.list("actor_policies")
+	for _, p := range policies {
+		n := str(p["name"])
+		if _, ok := actors[n]; !ok {
+			actors[n] = 0
 		}
 	}
 	out := []Object{}

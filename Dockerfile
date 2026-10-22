@@ -21,5 +21,5 @@ ENV MEDIASHELF_ADDR=0.0.0.0:8765 MEDIASHELF_DATA_DIR=/data MEDIASHELF_WEB_DIR=/a
 USER mediashelf
 EXPOSE 8765
 VOLUME ["/data"]
-HEALTHCHECK --interval=30s --timeout=3s --start-period=10s CMD wget -q -O /dev/null http://127.0.0.1:8765/healthz || exit 1
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s CMD ["/app/server", "--healthcheck"]
 ENTRYPOINT ["/app/server"]

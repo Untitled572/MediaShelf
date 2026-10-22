@@ -7,18 +7,23 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"mediashelf/internal/integrations"
 )
 
 type Runner struct {
-	Config   Config
-	Client   *Client
-	Logger   *log.Logger
-	Interval time.Duration
+	Config    Config
+	Client    *Client
+	Logger    *log.Logger
+	Interval  time.Duration
+	Journal   *ResultJournal
+	journalMu sync.Mutex
+	scanMu    sync.Mutex
 }
 type scanPayload struct {
 	LibraryID string `json:"library_id"`
@@ -46,6 +51,7 @@ type qbitParams struct {
 	SavePath      string   `json:"save_path"`
 	Tags          string   `json:"tags"`
 	Paused        bool     `json:"paused"`
+	AutoTMM       *bool    `json:"auto_tmm"`
 	DownloadLimit int64    `json:"download_limit"`
 	UploadLimit   int64    `json:"upload_limit"`
 }
@@ -54,9 +60,34 @@ func NewRunner(c Config, logger *log.Logger) *Runner {
 	return &Runner{Config: c, Client: NewClient(c), Logger: logger, Interval: 20 * time.Second}
 }
 
+func (r *Runner) ensureJournal() error {
+	r.journalMu.Lock()
+	defer r.journalMu.Unlock()
+	if r.Journal != nil {
+		return nil
+	}
+	path := r.Config.JournalPath
+	if path == "" {
+		path = "agent-journal.json"
+	}
+	j, err := OpenResultJournal(path)
+	if err != nil {
+		return err
+	}
+	r.Journal = j
+	return nil
+}
+
+// ScanNow starts a complete scan of all locally allowed libraries that the
+// server has registered for this device.
+func (r *Runner) ScanNow(ctx context.Context) error { return r.scanConfigured(ctx) }
+
 // Run retries transient server failures with bounded exponential backoff. With
 // once=true it performs one network cycle and returns its first error.
 func (r *Runner) Run(ctx context.Context, once, scanAll bool) error {
+	if err := r.ensureJournal(); err != nil {
+		return err
+	}
 	if !once {
 		if err := r.Client.Heartbeat(); err != nil {
 			r.logf("initial heartbeat: %v", err)
@@ -117,6 +148,18 @@ func (r *Runner) Run(ctx context.Context, once, scanAll bool) error {
 }
 
 func (r *Runner) cycle(ctx context.Context) error {
+	if err := r.ensureJournal(); err != nil {
+		return err
+	}
+	for id, pending := range r.Journal.Pending() {
+		if err := r.Client.Result(url.PathEscape(id), pending.Status, pending.Result); err != nil {
+			r.logf("retry result for job %s: %v", id, err)
+			continue
+		}
+		if err := r.Journal.Remove(id); err != nil {
+			r.logf("remove journaled result for job %s: %v", id, err)
+		}
+	}
 	jobs, err := r.Client.Poll()
 	if err != nil {
 		return err
@@ -126,49 +169,71 @@ func (r *Runner) cycle(ctx context.Context) error {
 		if job.ID == "" {
 			continue
 		}
-		status := "completed"
-		result := "ok"
-		if job.Type == "scan" || job.Type == "scan_library" {
-			var p scanPayload
-			if e := json.Unmarshal(job.Payload, &p); e != nil {
-				status = "failed"
-				result = e.Error()
-			} else if e = r.scanLibrary(ctx, p.LibraryID, &remote); e != nil {
-				status = "failed"
-				result = e.Error()
+		if pending, ok := r.Journal.Get(job.ID); ok {
+			if e := r.Client.Result(url.PathEscape(job.ID), pending.Status, pending.Result); e != nil {
+				r.logf("retry result for job %s: %v", job.ID, e)
+			} else if e = r.Journal.Remove(job.ID); e != nil {
+				r.logf("remove journaled result for job %s: %v", job.ID, e)
 			}
-		} else if job.Type == "launch" || job.Type == "launch_tool" || job.Type == "tool_launch" {
-			var p toolPayload
-			if e := json.Unmarshal(job.Payload, &p); e != nil {
-				status = "failed"
-				result = e.Error()
-			} else if e = r.launchAllowedTool(p.ToolID, &remote); e != nil {
-				status = "failed"
-				result = e.Error()
+			continue
+		}
+		status, result := r.executeJob(ctx, job, &remote)
+		if err := r.Journal.Save(job.ID, PendingResult{Status: status, Result: result}); err != nil {
+			r.logf("persist result for job %s: %v", job.ID, err)
+			if e := r.Client.Result(url.PathEscape(job.ID), "failed", "could not persist local job result"); e != nil {
+				r.logf("report unjournaled result for job %s: %v", job.ID, e)
 			}
-		} else if job.Type == "qbit" {
-			var p qbitPayload
-			if e := json.Unmarshal(job.Payload, &p); e != nil {
-				status = "failed"
-				result = e.Error()
-			} else {
-				data, e := r.runQBit(ctx, p)
-				if e != nil {
-					status = "failed"
-					result = marshalQBitResult(p.RequestID, e.Error())
-				} else {
-					result = marshalQBitResult(p.RequestID, data)
-				}
-			}
-		} else {
-			status = "failed"
-			result = "unsupported job type"
+			continue
 		}
 		if e := r.Client.Result(url.PathEscape(job.ID), status, result); e != nil {
 			r.logf("report job %s: %v", job.ID, e)
+		} else if e = r.Journal.Remove(job.ID); e != nil {
+			r.logf("remove journaled result for job %s: %v", job.ID, e)
 		}
 	}
 	return nil
+}
+
+func (r *Runner) executeJob(ctx context.Context, job Job, remote **RemoteConfig) (string, string) {
+	status := "completed"
+	result := "ok"
+	if job.Type == "scan" || job.Type == "scan_library" {
+		var p scanPayload
+		if e := json.Unmarshal(job.Payload, &p); e != nil {
+			status = "failed"
+			result = e.Error()
+		} else if e := r.scanLibrary(ctx, p.LibraryID, remote); e != nil {
+			status = "failed"
+			result = e.Error()
+		}
+	} else if job.Type == "launch" || job.Type == "launch_tool" || job.Type == "tool_launch" {
+		var p toolPayload
+		if e := json.Unmarshal(job.Payload, &p); e != nil {
+			status = "failed"
+			result = e.Error()
+		} else if e := r.launchAllowedTool(p.ToolID, remote); e != nil {
+			status = "failed"
+			result = e.Error()
+		}
+	} else if job.Type == "qbit" {
+		var p qbitPayload
+		if e := json.Unmarshal(job.Payload, &p); e != nil {
+			status = "failed"
+			result = e.Error()
+		} else {
+			data, e := r.runQBit(ctx, p)
+			if e != nil {
+				status = "failed"
+				result = marshalQBitResult(p.RequestID, e.Error())
+			} else {
+				result = marshalQBitResult(p.RequestID, data)
+			}
+		}
+	} else {
+		status = "failed"
+		result = "unsupported job type"
+	}
+	return status, result
 }
 
 func (r *Runner) heartbeatLoop(ctx context.Context) {
@@ -202,9 +267,6 @@ func (r *Runner) runQBit(ctx context.Context, p qbitPayload) (any, error) {
 	if !sameHTTPURL(allowlist.URL, p.Config.URL) {
 		return nil, errors.New("job downloader URL does not match local allowlist")
 	}
-	if p.Config.Username == "" || p.Config.Password == "" {
-		return nil, errors.New("qBittorrent credentials are required")
-	}
 	var params qbitParams
 	if len(p.Params) > 0 {
 		if err := json.Unmarshal(p.Params, &params); err != nil {
@@ -221,6 +283,8 @@ func (r *Runner) runQBit(ctx context.Context, p qbitPayload) (any, error) {
 	switch strings.ToLower(strings.TrimSpace(p.Operation)) {
 	case "torrents", "list":
 		return client.ListTorrents(ctx, params.Category)
+	case "categories":
+		return client.ListCategories(ctx)
 	case "action":
 		switch strings.ToLower(params.Action) {
 		case "start":
@@ -249,7 +313,7 @@ func (r *Runner) runQBit(ctx context.Context, p qbitPayload) (any, error) {
 		if strings.TrimSpace(params.URL) == "" {
 			return nil, errors.New("torrent URL is required")
 		}
-		if err = client.Add(ctx, integrations.AddTorrent{URL: params.URL, SavePath: params.SavePath, Category: params.Category, Tags: params.Tags, Paused: params.Paused}); err != nil {
+		if err = client.Add(ctx, integrations.AddTorrent{URL: params.URL, SavePath: params.SavePath, Category: params.Category, Tags: params.Tags, Paused: params.Paused, AutoTMM: params.AutoTMM}); err != nil {
 			return nil, err
 		}
 		return map[string]any{"ok": true}, nil
@@ -283,6 +347,8 @@ func (r *Runner) remoteConfig(cache **RemoteConfig) (*RemoteConfig, error) {
 }
 
 func (r *Runner) scanLibrary(ctx context.Context, id string, remote **RemoteConfig) error {
+	r.scanMu.Lock()
+	defer r.scanMu.Unlock()
 	root, ok := r.Config.LibraryRoot(id)
 	if !ok {
 		return fmt.Errorf("library %q is not locally allowlisted", id)
@@ -304,11 +370,18 @@ func (r *Runner) scanLibrary(ctx context.Context, id string, remote **RemoteConf
 	}
 	for i := range s.Works {
 		if s.Works[i].coverPath != "" {
-			u, e := r.Client.UploadCover(s.Works[i].coverPath)
-			if e == nil {
-				s.Works[i].CoverURL = u
+			coverPath := s.Works[i].coverPath
+			if info, statErr := os.Stat(coverPath); statErr != nil {
+				r.logf("cover stat: %v", statErr)
+			} else if cached, ok := r.Journal.CachedCover(coverPath, info.Size(), info.ModTime()); ok {
+				s.Works[i].CoverURL = cached
+			} else if uploaded, uploadErr := r.Client.UploadCover(coverPath); uploadErr != nil {
+				r.logf("cover upload: %v", uploadErr)
 			} else {
-				r.logf("cover upload for %s: %v", s.Works[i].Title, e)
+				s.Works[i].CoverURL = uploaded
+				if cacheErr := r.Journal.CacheCover(coverPath, info.Size(), info.ModTime(), uploaded); cacheErr != nil {
+					r.logf("cache cover URL: %v", cacheErr)
+				}
 			}
 		}
 		s.Works[i].coverPath = ""

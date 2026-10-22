@@ -5,10 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"mime"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 )
@@ -103,36 +100,13 @@ func (c *Client) Scan(libraryID string, complete bool, works []Work) error {
 	return c.request(http.MethodPost, "/api/v1/agent/scan", map[string]any{"library_id": libraryID, "complete": complete, "works": works}, "", nil)
 }
 func (c *Client) UploadCover(path string) (string, error) {
-	f, e := os.Open(path)
+	b, e := MakeCoverThumbnail(path)
 	if e != nil {
 		return "", e
-	}
-	defer f.Close()
-	st, e := f.Stat()
-	if e != nil {
-		return "", e
-	}
-	if st.Size() > 8*1024*1024 {
-		return "", fmt.Errorf("cover exceeds 8 MB")
-	}
-	ext := strings.ToLower(filepath.Ext(path))
-	ct := mime.TypeByExtension(ext)
-	if ext == ".jpg" {
-		ct = "image/jpeg"
-	}
-	if ct != "image/jpeg" && ct != "image/png" {
-		return "", fmt.Errorf("unsupported cover type %s", ext)
-	}
-	b, e := io.ReadAll(io.LimitReader(f, 8*1024*1024+1))
-	if e != nil {
-		return "", e
-	}
-	if len(b) > 8*1024*1024 {
-		return "", fmt.Errorf("cover exceeds 8 MB")
 	}
 	var v struct {
 		URL string `json:"url"`
 	}
-	e = c.request(http.MethodPost, "/api/v1/agent/covers", b, ct, &v)
+	e = c.request(http.MethodPost, "/api/v1/agent/covers", b, "image/jpeg", &v)
 	return v.URL, e
 }

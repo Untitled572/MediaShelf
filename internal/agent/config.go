@@ -19,11 +19,13 @@ type Config struct {
 	Tools               map[string]Tool       `json:"tools"`
 	Downloaders         map[string]Downloader `json:"downloaders,omitempty"`
 	ScanIntervalMinutes int                   `json:"scan_interval_minutes,omitempty"`
+	JournalPath         string                `json:"journal_path,omitempty"`
 }
 
 type Tool struct {
-	Path       string `json:"path"`
-	WorkingDir string `json:"working_dir,omitempty"`
+	Path       string   `json:"path"`
+	WorkingDir string   `json:"working_dir,omitempty"`
+	Args       []string `json:"args,omitempty"`
 }
 
 type Downloader struct {
@@ -59,6 +61,9 @@ func (c Config) Validate() error {
 	if c.ScanIntervalMinutes < 0 {
 		return errors.New("scan_interval_minutes cannot be negative")
 	}
+	if c.JournalPath != "" && !filepath.IsAbs(c.JournalPath) {
+		return errors.New("journal_path must be absolute")
+	}
 	for id, root := range c.Libraries {
 		if strings.TrimSpace(id) == "" || strings.TrimSpace(root) == "" {
 			return errors.New("library IDs and roots must be non-empty")
@@ -80,7 +85,15 @@ func (c Config) Validate() error {
 		if strings.ContainsAny(tool.Path, "\r\n\x00\"") {
 			return fmt.Errorf("tool %q path contains unsafe characters", id)
 		}
+		for _, arg := range tool.Args {
+			if strings.ContainsRune(arg, 0) {
+				return fmt.Errorf("tool %q argument contains NUL", id)
+			}
+		}
 		ext := strings.ToLower(filepath.Ext(tool.Path))
+		if (ext == ".cmd" || ext == ".bat") && len(tool.Args) > 0 {
+			return fmt.Errorf("tool %q script args are not supported", id)
+		}
 		if (ext == ".cmd" || ext == ".bat") && strings.ContainsAny(tool.Path, "%!^&|<>()") {
 			return fmt.Errorf("tool %q script path contains command-interpreter metacharacters", id)
 		}

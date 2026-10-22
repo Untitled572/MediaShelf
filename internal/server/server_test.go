@@ -172,4 +172,128 @@ func TestNonImageCoverRejected(t *testing.T) {
 	}
 }
 
+func TestScanMergesRichNFOWithBareFilesInEitherOrder(t *testing.T) {
+	a := testApp(t)
+	_, dt := device(t, a)
+	_ = a.put("libraries", Object{"id": "lib2", "device_id": "dev1", "path": "D:/staging"})
+	rich := func(code, title, rel string) Object {
+		return Object{"library_id": "lib1", "complete": true, "works": []Object{{"code": code, "title": title, "year": 2024, "actors": []string{"NFO Actor"}, "tags": []string{"Drama"}, "source_rating": 8.7, "source_url": "https://catalog.example/item", "cover_url": "/covers/rich.jpg", "kind": "2D", "has_nfo": true, "files": []Object{{"relative_path": rel, "size": 10}}}}}
+	}
+	bare := func(code, title, rel string, includeMarker bool) Object {
+		work := Object{"code": code, "title": title, "actors": []string{}, "tags": []string{}, "source_rating": nil, "source_url": "", "kind": "VR", "files": []Object{{"relative_path": rel, "size": 11}}}
+		if includeMarker {
+			work["has_nfo"] = false
+		}
+		return Object{"library_id": "lib2", "complete": true, "works": []Object{work}}
+	}
+	scan := func(payload Object) {
+		t.Helper()
+		if w := req(t, a, http.MethodPost, "/api/v1/agent/scan", dt, payload); w.Code != http.StatusOK {
+			t.Fatalf("scan failed: %d %s", w.Code, w.Body.String())
+		}
+	}
+
+	// Rich NFO first, then a later staging-library filename-only scan.
+	scan(rich("MIX-001", "NFO Original Title", "2D/MIX-001/MIX-001.mkv"))
+	scan(bare("MIX-001", "MIX-001 VR Disk", "VR/MIX-001/MIX-001.mkv", false)) // pre-marker agent payload
+	merged, err := a.get("works", "code:MIX-001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertMergedScan(t, merged, "NFO Original Title", 2)
+	if str(merged["kind"]) != "VR" {
+		t.Fatalf("scan kind should continue to reflect the latest library classification: %q", merged["kind"])
+	}
+
+	// Reverse order: NFO metadata should enrich the prior filename fallback.
+	scan(bare("MIX-002", "MIX-002 disk", "VR/MIX-002/MIX-002.mkv", true))
+	scan(rich("MIX-002", "NFO Enriched Title", "2D/MIX-002/MIX-002.mkv"))
+	merged, err = a.get("works", "code:MIX-002")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertMergedScan(t, merged, "NFO Enriched Title", 2)
+}
+
+func assertMergedScan(t *testing.T, work Object, title string, fileCount int) {
+	t.Helper()
+	if str(work["title"]) != title || num(work["year"]) != 2024 || num(work["source_rating"]) != 8.7 || str(work["source_url"]) != "https://catalog.example/item" || str(work["cover_url"]) != "/covers/rich.jpg" {
+		t.Fatalf("rich NFO metadata was lost: %#v", work)
+	}
+	if !contains(work["actors"], "NFO Actor") || !contains(work["tags"], "Drama") || len(asObjects(work["files"])) != fileCount {
+		t.Fatalf("actors/tags/files were not preserved and merged: %#v", work)
+	}
+}
+
+func TestScanNFOMergeRespectsManualFields(t *testing.T) {
+	a := testApp(t)
+	_, dt := device(t, a)
+	_ = a.put("libraries", Object{"id": "lib2", "device_id": "dev1", "path": "D:/staging"})
+	token := login(t, a)
+	rich := Object{"library_id": "lib1", "complete": true, "works": []Object{{"code": "MAN-001", "title": "NFO Title", "year": 2022, "actors": []string{"NFO Actor"}, "tags": []string{"Drama"}, "source_rating": 9.0, "kind": "2D", "has_nfo": true, "files": []Object{{"relative_path": "2D/MAN-001.mkv"}}}}}
+	if w := req(t, a, http.MethodPost, "/api/v1/agent/scan", dt, rich); w.Code != http.StatusOK {
+		t.Fatal(w.Body.String())
+	}
+	patch := Object{"title": "My Title", "actors": []string{"My Actor"}, "tags": []string{"My Tag"}, "rating": 4.5}
+	if w := req(t, a, http.MethodPatch, "/api/v1/works/code:MAN-001", token, patch); w.Code != http.StatusOK {
+		t.Fatal(w.Body.String())
+	}
+	bare := Object{"library_id": "lib2", "complete": true, "works": []Object{{"code": "MAN-001", "title": "MAN-001 disk", "year": nil, "actors": []string{}, "tags": []string{}, "source_rating": nil, "source_url": "", "kind": "VR", "has_nfo": false, "files": []Object{{"relative_path": "VR/MAN-001.mkv"}}}}}
+	if w := req(t, a, http.MethodPost, "/api/v1/agent/scan", dt, bare); w.Code != http.StatusOK {
+		t.Fatal(w.Body.String())
+	}
+	work, _ := a.get("works", "code:MAN-001")
+	if str(work["title"]) != "My Title" || !contains(work["actors"], "My Actor") || contains(work["actors"], "NFO Actor") || !contains(work["tags"], "My Tag") || num(work["rating"]) != 4.5 || num(work["source_rating"]) != 9.0 || len(asObjects(work["files"])) != 2 {
+		t.Fatalf("manual fields or files were not preserved: %#v", work)
+	}
+}
+
 var _ = http.MethodGet
+
+func TestWorkCodeNormalizationForOwnedAndQueueDuplicates(t *testing.T) {
+	a := testApp(t)
+	if err := a.put("works", Object{
+		"id": "code:IPX-177", "code": "IPX-177",
+		"files": []Object{{"relative_path": "IPX-177.mkv", "missing": false}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, code := range []string{"IPX177", "IPX-177", "IPX_177"} {
+		if !a.owned(code) {
+			t.Errorf("owned(%q) did not match existing IPX-177", code)
+		}
+	}
+	if err := a.put("works", Object{
+		"id": "legacy-custom-id", "code": "FC2 PPV 12345678",
+		"files": []Object{{"relative_path": "fc2.mkv", "missing": false}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, code := range []string{"FC2PPV12345678", "FC2-PPV-12345678", "FC2 PPV 12345678"} {
+		if !a.owned(code) {
+			t.Errorf("owned(%q) did not match FC2 PPV variant", code)
+		}
+	}
+	if sameWorkCode("CUSTOM#001", "CUSTOM001") {
+		t.Fatal("unknown code punctuation was discarded")
+	}
+	if sameWorkCode("", "") {
+		t.Fatal("empty codes must not match")
+	}
+	queued := []Object{{"name": "IPX-177 sample", "hash": "aa"}, {"name": "FC2-PPV-12345678 sample", "hash": "bb"}}
+	if !queueDuplicate(queued, "https://example.test/other.torrent", "IPX177") {
+		t.Fatal("queue duplicate missed compact IPX code")
+	}
+	if !queueDuplicate(queued, "https://example.test/other.torrent", "FC2PPV12345678") {
+		t.Fatal("queue duplicate missed compact FC2 code")
+	}
+	if queueDuplicate(queued, "https://example.test/other.torrent", "CUSTOM001") {
+		t.Fatal("unknown code was spuriously merged")
+	}
+	if a.owned("CUSTOM001") {
+		t.Fatal("unknown code was spuriously treated as owned")
+	}
+	if _, err := a.get("works", "code:IPX177"); err == nil {
+		t.Fatal("normalization must not migrate or create alternate work IDs")
+	}
+}

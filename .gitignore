@@ -10,3 +10,4 @@ agent.json
 *.log
 *.exe
 coverage.out
+*.tsbuildinfo

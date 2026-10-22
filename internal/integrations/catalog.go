@@ -28,6 +28,7 @@ type Metadata struct {
 	RatingCount    int      `json:"rating_count,omitempty"`
 	RatingRaw      string   `json:"rating_raw,omitempty"`
 	RatingCountRaw string   `json:"rating_count_raw,omitempty"`
+	RatingScale    string   `json:"rating_scale,omitempty"`
 	CoverURL       string   `json:"cover_url,omitempty"`
 	SourceURL      string   `json:"source_url,omitempty"`
 	Source         string   `json:"source"`
@@ -37,6 +38,7 @@ type ActorPage struct {
 	Works      []Metadata `json:"works"`
 	Page       int        `json:"page"`
 	TotalPages int        `json:"total_pages,omitempty"`
+	NextURL    string     `json:"next_url,omitempty"`
 	HasMore    bool       `json:"has_more"`
 	Complete   bool       `json:"complete"`
 }
@@ -73,15 +75,23 @@ func NewCatalogClient(c CatalogConfig) (*CatalogClient, error) {
 		transport.Proxy = http.ProxyURL(pu)
 		transport.DialContext = (&net.Dialer{Timeout: 8 * time.Second}).DialContext
 	}
-	return &CatalogClient{source: source, base: base, cookie: c.Cookie, proxyConfigured: c.ProxyURL != "", client: &http.Client{Transport: transport, Timeout: 12 * time.Second, CheckRedirect: func(req *http.Request, via []*http.Request) error {
-		if len(via) >= 5 {
-			return errors.New("too many provider redirects")
+	cookie := c.Cookie
+	if source == "fanza" && !strings.Contains(strings.ToLower(cookie), "age_check_done=") {
+		if cookie != "" {
+			cookie += "; "
 		}
-		if len(via) > 0 && !sameOrigin(req.URL, via[len(via)-1].URL) {
-			req.Header.Del("Cookie")
-		}
-		return validateExternalURL(req.URL)
-	}}}, nil
+		cookie += "age_check_done=1"
+	}
+	return &CatalogClient{source: source, base: base, cookie: cookie, proxyConfigured: c.ProxyURL != "", client: &http.Client{Transport: transport, Timeout: 12 * time.Second, CheckRedirect: providerRedirectPolicy}}, nil
+}
+func providerRedirectPolicy(req *http.Request, via []*http.Request) error {
+	if len(via) >= 5 {
+		return errors.New("too many provider redirects")
+	}
+	if len(via) > 0 && !sameOrigin(req.URL, via[len(via)-1].URL) {
+		req.Header.Del("Cookie")
+	}
+	return validateExternalURL(req.URL)
 }
 func sameOrigin(a, b *url.URL) bool {
 	return a != nil && b != nil && strings.EqualFold(a.Scheme, b.Scheme) && strings.EqualFold(a.Host, b.Host)
@@ -162,7 +172,8 @@ func (c *CatalogClient) fetch(ctx context.Context, raw string) (*html.Node, stri
 	}
 	req.Header.Set("User-Agent", "MediaShelf/1.0 (+metadata lookup)")
 	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.7,ja;q=0.5")
-	if c.cookie != "" {
+	baseURL, _ := url.Parse(c.base)
+	if c.cookie != "" && sameOrigin(u, baseURL) {
 		req.Header.Set("Cookie", c.cookie)
 	}
 	resp, e := c.client.Do(req)
@@ -186,11 +197,22 @@ func (c *CatalogClient) fetch(ctx context.Context, raw string) (*html.Node, stri
 	if len(b) > 4<<20 {
 		return nil, "", errors.New("provider response exceeds 4 MiB limit")
 	}
+	if hasBrowserVerificationChallenge(b) {
+		return nil, "", fmt.Errorf("%s provider requires browser verification; data source is restricted", c.source)
+	}
 	n, e := html.Parse(strings.NewReader(string(b)))
 	if e != nil {
 		return nil, "", e
 	}
 	return n, resp.Request.URL.String(), nil
+}
+
+// hasBrowserVerificationChallenge matches explicit Cloudflare challenge-page
+// markers. Generic Cloudflare CDN or Insights URLs are common on ordinary
+// pages and must not be treated as an access challenge.
+func hasBrowserVerificationChallenge(body []byte) bool {
+	s := strings.ToLower(string(body))
+	return strings.Contains(s, "challenge-platform") || strings.Contains(s, "cf-chl-") || strings.Contains(s, "cf_chl_")
 }
 
 func validateExternalHost(ctx context.Context, host string) error {
@@ -241,7 +263,7 @@ func (c *CatalogClient) lookupJavDB(ctx context.Context, code string) (Metadata,
 		if detail != "" || n.Type != html.ElementNode || n.Data != "a" || !hasClass(n, "box") {
 			return
 		}
-		title := firstClassText(n, "video-title")
+		title := videoCodeText(n)
 		if normalizeCode(title) == code {
 			detail = attr(n, "href")
 		}
@@ -294,8 +316,10 @@ func (c *CatalogClient) lookupFanza(ctx context.Context, code string) (Metadata,
 			return
 		}
 		href := attr(n, "href")
-		if strings.Contains(href, "/detail/") && strings.Contains(strings.ToLower(href), "cid="+strings.ToLower(code)) {
-			detail = href
+		if strings.Contains(href, "/detail/") {
+			if strings.Contains(strings.ToLower(href), "cid="+strings.ToLower(code)) || normalizeCode(codeRE.FindString(nodeText(n))) == code {
+				detail = href
+			}
 		}
 	})
 	if detail == "" {
@@ -316,7 +340,7 @@ func (c *CatalogClient) SearchActor(ctx context.Context, name string) (ActorPage
 	var search string
 	switch c.source {
 	case "javdb":
-		q := url.Values{"q": {name}}
+		q := url.Values{"q": {name}, "f": {"actor"}}
 		search = c.base + "/search?" + q.Encode()
 	case "javlibrary":
 		q := url.Values{"keyword": {name}}
@@ -381,8 +405,12 @@ func (c *CatalogClient) Catalog(ctx context.Context, actor string, page int) (Ac
 		return ActorPage{}, e
 	}
 	if !u.IsAbs() {
-		u, _ = url.Parse(c.base)
-		u = u.ResolveReference(&url.URL{Path: target})
+		rel, parseErr := url.Parse(target)
+		if parseErr != nil {
+			return ActorPage{}, parseErr
+		}
+		base, _ := url.Parse(c.base)
+		u = base.ResolveReference(rel)
 	}
 	if e = validateExternalURL(u); e != nil {
 		return ActorPage{}, e
@@ -405,7 +433,9 @@ func (c *CatalogClient) Catalog(ctx context.Context, actor string, page int) (Ac
 	case "fanza":
 		parseFanzaCatalog(root, final, &p)
 	}
-	p.HasMore = hasNextPage(root)
+	p.NextURL = nextPageURL(root, final)
+	p.HasMore = p.NextURL != ""
+	p.TotalPages = totalPages(root)
 	if len(p.Works) == 0 && !p.HasMore {
 		return ActorPage{}, fmt.Errorf("%s: provider page had no recognizable catalog entries", c.source)
 	}
@@ -418,7 +448,7 @@ func parseJavDBCatalog(root *html.Node, base string, p *ActorPage) {
 		if n.Type != html.ElementNode || n.Data != "a" || !hasClass(n, "box") {
 			return
 		}
-		code, href := strings.TrimSpace(firstClassText(n, "video-title")), attr(n, "href")
+		code, href := strings.TrimSpace(videoCodeText(n)), attr(n, "href")
 		if code == "" || href == "" {
 			return
 		}
@@ -480,6 +510,9 @@ func parseDetail(root *html.Node, code, source, sourceURL string) Metadata {
 	if m.CoverURL == "" {
 		m.CoverURL = firstClassAttr(root, "video-cover", "src")
 	}
+	if m.CoverURL != "" {
+		m.CoverURL = resolveURL(sourceURL, m.CoverURL)
+	}
 	labelMap := map[string]string{}
 	walk(root, func(n *html.Node) {
 		if n.Type != html.ElementNode {
@@ -490,6 +523,10 @@ func parseDetail(root *html.Node, code, source, sourceURL string) Metadata {
 			label = strings.TrimSpace(nodeText(n))
 		}
 		if label == "" {
+			return
+		}
+		if strings.Contains(strings.ToLower(label), "actress") || strings.Contains(strings.ToLower(label), "performer") || strings.Contains(label, "演員") {
+			m.Actors = append(m.Actors, anchorTexts(nextSiblingNode(n))...)
 			return
 		}
 		v := nextSiblingText(n)
@@ -527,30 +564,154 @@ func parseDetail(root *html.Node, code, source, sourceURL string) Metadata {
 		}
 		if hasClass(n, "score") || hasClass(n, "score-stars") {
 			raw := strings.TrimSpace(nodeText(n))
-			if raw != "" {
-				m.RatingRaw = raw
-				m.RatingCountRaw = raw
-				if count := ratingCountRE.FindStringSubmatch(raw); len(count) > 1 {
-					m.RatingCount, _ = strconv.Atoi(strings.ReplaceAll(count[1], ",", ""))
-				}
-				if f, e := strconv.ParseFloat(strings.Fields(raw)[0], 64); e == nil {
-					m.SourceRating = &f
-					scaled := f
-					if source == "javdb" {
-						scaled *= 2
-					}
-					m.Rating = &scaled
-				}
+			if source == "javdb" && hasClass(n, "score-stars") {
+				raw = strings.TrimSpace(followingText(n))
 			}
+			setSourceRating(&m, raw, source)
 		}
 	})
+	if source == "fanza" {
+		parseFanzaRating(root, &m)
+	}
 	if m.Title == "" {
 		m.Title = firstElementText(root, "title")
 	}
 	return m
 }
 
-var ratingCountRE = regexp.MustCompile(`(?:\(|（|評論\s*)([0-9][0-9,]*)(?:\)|）)?`)
+var scoreRE = regexp.MustCompile(`(?i)([0-9]+(?:[.,][0-9]+)?)`)
+var ratingCountRE = regexp.MustCompile(`(?i)(?:評論|評價|reviews?|votes?|ratings?)\s*[:：]?\s*([0-9][0-9,]*)|[（(]\s*([0-9][0-9,]*)\s*[）)]`)
+
+func setSourceRating(m *Metadata, raw, source string) {
+	if strings.TrimSpace(raw) == "" {
+		return
+	}
+	m.RatingRaw = raw
+	count := ratingCountRE.FindStringSubmatch(raw)
+	if len(count) > 1 {
+		for _, value := range count[1:] {
+			if value != "" {
+				m.RatingCountRaw = value
+				m.RatingCount, _ = strconv.Atoi(strings.ReplaceAll(value, ",", ""))
+				break
+			}
+		}
+	}
+	match := scoreRE.FindStringSubmatch(raw)
+	if len(match) < 2 {
+		return
+	}
+	f, err := strconv.ParseFloat(strings.ReplaceAll(match[1], ",", "."), 64)
+	if err != nil {
+		return
+	}
+	divisor := 1.0
+	switch source {
+	case "javdb":
+		m.RatingScale = "0-5"
+	case "javlibrary":
+		m.RatingScale = "0-10"
+		divisor = 2
+	case "fanza":
+		m.RatingScale = "0-50"
+		divisor = 10
+	default:
+		m.RatingScale = "source"
+	}
+	normalized := f / divisor
+	m.SourceRating = &f
+	m.Rating = &normalized
+}
+
+func parseFanzaRating(root *html.Node, m *Metadata) {
+	walk(root, func(n *html.Node) {
+		if n.Type != html.ElementNode || n.Data != "td" || !strings.Contains(nodeText(n), "平均評価") {
+			return
+		}
+		for cell := n.NextSibling; cell != nil; cell = cell.NextSibling {
+			if cell.Type != html.ElementNode || cell.Data != "td" {
+				continue
+			}
+			var raw string
+			walk(cell, func(x *html.Node) {
+				if x.Type == html.ElementNode && x.Data == "img" {
+					src := attr(x, "src")
+					base := src
+					if i := strings.LastIndex(base, "/"); i >= 0 {
+						base = base[i+1:]
+					}
+					if ext := strings.LastIndex(base, "."); ext >= 0 {
+						base = base[:ext]
+					}
+					if _, err := strconv.Atoi(base); err == nil {
+						raw = base
+					}
+				}
+			})
+			if raw != "" {
+				setSourceRating(m, raw, "fanza")
+			}
+			break
+		}
+	})
+}
+
+func nextSiblingNode(n *html.Node) *html.Node {
+	for x := n.NextSibling; x != nil; x = x.NextSibling {
+		if x.Type == html.TextNode && strings.TrimSpace(x.Data) == "" {
+			continue
+		}
+		return x
+	}
+	return nil
+}
+func anchorTexts(n *html.Node) []string {
+	out := []string{}
+	if n == nil {
+		return out
+	}
+	walk(n, func(x *html.Node) {
+		if x.Type == html.ElementNode && x.Data == "a" {
+			text := strings.TrimSpace(nodeText(x))
+			if text != "" {
+				out = appendUnique(out, text)
+			}
+		}
+	})
+	return out
+}
+func followingText(n *html.Node) string {
+	var b strings.Builder
+	for x := n.NextSibling; x != nil; x = x.NextSibling {
+		if x.Type == html.TextNode {
+			b.WriteString(x.Data)
+		} else {
+			break
+		}
+	}
+	return b.String()
+}
+func videoCodeText(n *html.Node) string {
+	var title *html.Node
+	walk(n, func(x *html.Node) {
+		if title == nil && x.Type == html.ElementNode && hasClass(x, "video-title") {
+			title = x
+		}
+	})
+	if title == nil {
+		return ""
+	}
+	var code string
+	walk(title, func(x *html.Node) {
+		if code == "" && x.Type == html.ElementNode && x.Data == "strong" {
+			code = strings.TrimSpace(nodeText(x))
+		}
+	})
+	if code != "" {
+		return code
+	}
+	return strings.TrimSpace(nodeText(title))
+}
 
 func splitNames(s string) []string {
 	a := strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == '，' || r == '/' || r == '、' })
@@ -690,9 +851,37 @@ func nextSiblingText(n *html.Node) string {
 func hasNextPage(n *html.Node) bool {
 	found := false
 	walk(n, func(x *html.Node) {
-		if x.Type == html.ElementNode && x.Data == "a" && (attr(x, "rel") == "next" || hasClass(x, "next")) {
+		if x.Type == html.ElementNode && x.Data == "a" && (attr(x, "rel") == "next" || hasClass(x, "next") || hasClass(x, "pagination-next")) {
 			found = true
 		}
 	})
 	return found
+}
+func nextPageURL(n *html.Node, base string) string {
+	var next string
+	walk(n, func(x *html.Node) {
+		if next != "" || x.Type != html.ElementNode || x.Data != "a" {
+			return
+		}
+		if attr(x, "rel") != "next" && !hasClass(x, "next") && !hasClass(x, "pagination-next") {
+			return
+		}
+		if href := attr(x, "href"); href != "" {
+			next = resolveURL(base, href)
+		}
+	})
+	return next
+}
+func totalPages(n *html.Node) int {
+	max := 0
+	walk(n, func(x *html.Node) {
+		if x.Type != html.ElementNode || x.Data != "a" || !hasClass(x, "pagination-link") {
+			return
+		}
+		v, err := strconv.Atoi(strings.TrimSpace(nodeText(x)))
+		if err == nil && v > max {
+			max = v
+		}
+	})
+	return max
 }

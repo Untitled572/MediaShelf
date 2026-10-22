@@ -1,0 +1,11 @@
+FROM scratch
+COPY --chmod=755 server /app/server
+COPY web/ /app/web/
+COPY ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --chown=10001:10001 data/ /data/
+USER 10001:10001
+ENV MEDIASHELF_ADDR=0.0.0.0:8765 MEDIASHELF_DATA_DIR=/data MEDIASHELF_WEB_DIR=/app/web
+EXPOSE 8765
+VOLUME ["/data"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s CMD ["/app/server", "--healthcheck"]
+ENTRYPOINT ["/app/server"]

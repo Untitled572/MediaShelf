@@ -19,6 +19,7 @@ import (
 type CatalogConfig struct{ Source, BaseURL, ProxyURL, Cookie string }
 type Metadata struct {
 	Code           string   `json:"code"`
+	ProviderID     string   `json:"provider_id,omitempty"`
 	Title          string   `json:"title"`
 	Year           int      `json:"year,omitempty"`
 	Actors         []string `json:"actors,omitempty"`
@@ -54,7 +55,7 @@ func NewCatalogClient(c CatalogConfig) (*CatalogClient, error) {
 	if source == "" {
 		source = "javdb"
 	}
-	bases := map[string]string{"javdb": "https://javdb.com", "javlibrary": "https://www.javlibrary.com", "fanza": "https://www.dmm.co.jp"}
+	bases := map[string]string{"javdb": "https://javdb.com", "javlibrary": "https://www.javlibrary.com", "fanza": "https://www.dmm.co.jp", "javbus": "https://www.javbus.com", "jav321": "https://www.jav321.com"}
 	base := strings.TrimRight(c.BaseURL, "/")
 	if base == "" {
 		base = bases[source]
@@ -200,6 +201,9 @@ func (c *CatalogClient) fetch(ctx context.Context, raw string) (*html.Node, stri
 	if hasBrowserVerificationChallenge(b) {
 		return nil, "", fmt.Errorf("%s provider requires browser verification; data source is restricted", c.source)
 	}
+	if c.source == "javbus" && (strings.Contains(strings.ToLower(resp.Request.URL.Path), "/doc/driver-verify") || strings.Contains(strings.ToLower(string(b)), "age verification") || strings.Contains(string(b), "年龄验证")) {
+		return nil, "", errors.New("javbus requires age/driver verification; data source is restricted")
+	}
 	n, e := html.Parse(strings.NewReader(string(b)))
 	if e != nil {
 		return nil, "", e
@@ -248,6 +252,10 @@ func (c *CatalogClient) Lookup(ctx context.Context, code string) (Metadata, erro
 		return c.lookupJavLibrary(ctx, code)
 	case "fanza":
 		return c.lookupFanza(ctx, code)
+	case "javbus":
+		return c.lookupJavBus(ctx, code)
+	case "jav321":
+		return c.lookupJav321(ctx, code)
 	default:
 		return Metadata{}, errors.New("unsupported catalog source")
 	}
@@ -347,6 +355,10 @@ func (c *CatalogClient) SearchActor(ctx context.Context, name string) (ActorPage
 		search = c.base + "/cn/vl_star.php?" + q.Encode()
 	case "fanza":
 		search = c.base + "/search/=/searchstr=" + url.PathEscape(name) + "/"
+	case "javbus":
+		search = c.base + "/search/" + url.PathEscape(name)
+	case "jav321":
+		return ActorPage{}, errors.New("jav321 supports code lookup only")
 	default:
 		return ActorPage{}, errors.New("unsupported catalog source")
 	}
@@ -378,6 +390,10 @@ func (c *CatalogClient) SearchActor(ctx context.Context, name string) (ActorPage
 			if strings.Contains(h, "article=actress") || strings.Contains(h, "/actress/") || strings.Contains(h, "/performer/") {
 				p.Actor = href
 			}
+		case "javbus":
+			if strings.Contains(strings.ToLower(href), "/star/") {
+				p.Actor = href
+			}
 		}
 	})
 	if p.Actor == "" {
@@ -386,6 +402,9 @@ func (c *CatalogClient) SearchActor(ctx context.Context, name string) (ActorPage
 	return p, nil
 }
 func (c *CatalogClient) Catalog(ctx context.Context, actor string, page int) (ActorPage, error) {
+	if c.source == "jav321" {
+		return ActorPage{}, errors.New("jav321 supports code lookup only")
+	}
 	if page < 1 {
 		return ActorPage{}, errors.New("page must be >= 1")
 	}
@@ -432,6 +451,10 @@ func (c *CatalogClient) Catalog(ctx context.Context, actor string, page int) (Ac
 		parseJavLibraryCatalog(root, final, &p)
 	case "fanza":
 		parseFanzaCatalog(root, final, &p)
+	case "javbus":
+		parseJavBusCatalog(root, final, &p)
+	case "jav321":
+		return ActorPage{}, errors.New("jav321 supports code lookup only")
 	}
 	p.NextURL = nextPageURL(root, final)
 	p.HasMore = p.NextURL != ""

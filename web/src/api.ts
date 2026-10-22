@@ -6,7 +6,11 @@ export type Device={id:string;name:string;online:boolean;last_seen:string}
 export type Library={id:string;device_id:string;name:string;path:string;openlist_base?:string;openlist_prefix?:string}
 export type Job={id:string;device_id:string;type:string;payload:unknown;status:string;result?:string;created_at:string}
 export type Candidate={id:string;code:string;title:string;url:string;source:string;owned:boolean;in_queue:boolean;status:string}
+const TOKEN_KEY='mediashelf_token'
+export function currentToken(){return sessionStorage.getItem(TOKEN_KEY)||localStorage.getItem(TOKEN_KEY)||''}
+export function clearToken(){for(const storage of [localStorage,sessionStorage]){storage.removeItem(TOKEN_KEY);storage.removeItem('mediashelf_token_expires_at')}}
+export function rememberToken(token:string,remember:boolean,expiresAt:string){clearToken();const storage=remember?localStorage:sessionStorage;storage.setItem(TOKEN_KEY,token);storage.setItem('mediashelf_token_expires_at',expiresAt);localStorage.setItem('mediashelf_remember_login',String(remember))}
 const API='/api/v1'
 export class ApiError extends Error{constructor(public status:number,message:string){super(message)}}
-export async function request<T>(path:string,init:RequestInit={}):Promise<T>{const headers=new Headers(init.headers);const token=localStorage.getItem('mediashelf_token');if(token)headers.set('Authorization',`Bearer ${token}`);if(init.body&&!(init.body instanceof FormData)&&!(init.body instanceof Blob))headers.set('Content-Type','application/json');const res=await fetch(API+path,{...init,headers});const text=await res.text();let data:any=null;try{data=text?JSON.parse(text):null}catch{data=text}if(!res.ok)throw new ApiError(res.status,data?.error||`请求失败 (${res.status})`);return data as T}
+export async function request<T>(path:string,init:RequestInit={}):Promise<T>{const headers=new Headers(init.headers);const token=currentToken();if(token&&!headers.has('Authorization'))headers.set('Authorization',`Bearer ${token}`);if(init.body&&!(init.body instanceof FormData)&&!(init.body instanceof Blob))headers.set('Content-Type','application/json');const res=await fetch(API+path,{...init,headers});const text=await res.text();let data:any=null;try{data=text?JSON.parse(text):null}catch{data=text}if(!res.ok)throw new ApiError(res.status,data?.error||`请求失败 (${res.status})`);return data as T}
 export const json=(method:string,body?:unknown):RequestInit=>({method,...(body===undefined?{}:{body:JSON.stringify(body)})})

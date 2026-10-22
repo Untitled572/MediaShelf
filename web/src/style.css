@@ -28,3 +28,10 @@
 .actor-chip{--actor-avatar-size:24px}.actor-list{display:flex;flex-wrap:wrap;gap:6px 10px;line-height:1.5}.work-code{display:flex;flex-wrap:wrap;align-items:center;gap:4px}.compact-status{margin-left:auto;padding:2px 6px;border-radius:4px;background:#edf4f3;color:#4b7877;font-size:11px}
 /* Readable defaults throughout the management views. */
 .table-wrap td,.table-wrap th{font-size:14px;line-height:1.5}.actor-list{font-size:14px}.field input,.field select{height:40px;font-size:15px}.device-card h3,.tool-copy h3,.feed-row b,.candidate-row b,.job-detail b{font-size:16px}.tool-copy p,.feed-row span,.feed-row small,.candidate-row small,.job-detail span,.job-detail small,.device-card p,.device-foot,.empty-inline{font-size:13px;line-height:1.5}.login-card>p{font-size:14px}.login-card>small{font-size:12px}.work-info h3{overflow-wrap:anywhere}.work-info{min-width:0}
+
+.sort-header{display:inline-flex;align-items:center;gap:9px;min-height:32px;padding:2px 0;border:0;background:transparent;color:inherit;font:inherit;font-weight:600;cursor:pointer;white-space:nowrap}
+.sort-header span{font-size:14px;color:var(--muted)}
+.sort-header:hover{color:var(--accent)}
+.sort-header:focus-visible{outline:2px solid var(--accent);outline-offset:4px;border-radius:3px}
+
+.login-methods{display:flex;gap:8px;margin:18px 0}.login-methods button{flex:1;border:1px solid #dbe3e5;border-radius:6px;padding:9px;background:#fff;color:#556267;font-size:14px;cursor:pointer}.login-methods button[aria-pressed=true]{background:#e8f2f3;color:#327f89;border-color:#79aeb5}.remember-login{display:flex;align-items:center;gap:8px;text-align:left;font-size:14px;color:#556267;margin:16px 0}.remember-login input{accent-color:#438b94}.empty-inline>b{display:block;font-size:15px}.empty-inline p{margin:8px 0 0}

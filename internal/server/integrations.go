@@ -112,10 +112,23 @@ func (a *App) integrationsAPI(w http.ResponseWriter, r *http.Request, p []string
 		a.recommend(w, kind)
 	case "sources":
 		if r.Method == "GET" {
-			xs, _ := a.list("sources")
-			for _, x := range xs {
+			saved, _ := a.list("sources")
+			xs := []Object{}
+			for _, provider := range catalogProviders() {
+				x := Object{}
+				for _, existing := range saved {
+					if str(existing["source"]) == str(provider["source"]) {
+						x = existing
+						break
+					}
+				}
+				for key, value := range provider {
+					x[key] = value
+				}
+				x["id"] = provider["source"]
 				x["cookie_configured"] = str(x["cookie"]) != ""
 				delete(x, "cookie")
+				xs = append(xs, x)
 			}
 			write(w, 200, xs)
 			return
@@ -223,6 +236,44 @@ func (a *App) downloadersAPI(w http.ResponseWriter, r *http.Request, p []string)
 				}
 				o["managed_tag"] = tag
 			}
+			if str(o["management_mode"]) == "categorical" {
+				categories := []string{}
+				if raw, present := o["managed_categories"]; !present {
+					categories = []string{"2D", "VR"}
+				} else {
+					switch values := raw.(type) {
+					case []string:
+						categories = append(categories, values...)
+					case []any:
+						for _, value := range values {
+							name, ok := value.(string)
+							if !ok {
+								fail(w, 400, "管理分类必须为非空分类名称列表")
+								return
+							}
+							categories = append(categories, name)
+						}
+					default:
+						fail(w, 400, "管理分类必须为非空分类名称列表")
+						return
+					}
+					if len(categories) == 0 {
+						fail(w, 400, "管理分类必须为非空分类名称列表")
+						return
+					}
+				}
+				seen := map[string]bool{}
+				for i, category := range categories {
+					category = strings.TrimSpace(category)
+					if category == "" || strings.ContainsAny(category, ",|\r\n") || len(category) > 100 || seen[category] {
+						fail(w, 400, "管理分类必须是非空且不重复的分类名称")
+						return
+					}
+					seen[category] = true
+					categories[i] = category
+				}
+				o["managed_categories"] = categories
+			}
 			if e := a.put("downloaders", o); e != nil {
 				fail(w, 500, e.Error())
 				return
@@ -299,6 +350,26 @@ func downloaderTag(d Object) string {
 	return "MediaShelf"
 }
 
+func downloaderCategories(d Object) []string {
+	if str(d["management_mode"]) != "categorical" {
+		return nil
+	}
+	categories := stringSlice(d["managed_categories"])
+	if len(categories) == 0 {
+		categories = []string{"2D", "VR"}
+	}
+	out := make([]string, 0, len(categories))
+	seen := map[string]bool{}
+	for _, category := range categories {
+		category = strings.TrimSpace(category)
+		if category != "" && !seen[category] {
+			seen[category] = true
+			out = append(out, category)
+		}
+	}
+	return out
+}
+
 func appendManagedTag(tags, required string) string {
 	for _, tag := range strings.Split(tags, ",") {
 		if strings.TrimSpace(tag) == required {
@@ -316,6 +387,7 @@ func (a *App) qbit(ctx context.Context, d Object, op string, params Object) (any
 		return nil, fmt.Errorf("仅支持删除任务并保留数据文件")
 	}
 	tag := downloaderTag(d)
+	managedCategories := downloaderCategories(d)
 	if tag != "" {
 		if op == "categories" {
 			return Object{}, nil
@@ -350,14 +422,47 @@ func (a *App) qbit(ctx context.Context, d Object, op string, params Object) (any
 			}
 		}
 	}
-	if op == "add" {
-		if str(d["management_mode"]) == "categorical" {
-			if str(params["category"]) == "" {
-				return nil, fmt.Errorf("本机自动管理模式需要选择分类")
+	if len(managedCategories) > 0 {
+		if op == "categories" {
+			// The category API response is filtered below for direct clients; agents
+			// receive the same allowlist and filter their response locally.
+		}
+		if op == "torrents" {
+			params["categories"] = managedCategories
+		}
+		if op == "add" {
+			category := strings.TrimSpace(str(params["category"]))
+			if !contains(managedCategories, category) {
+				return nil, fmt.Errorf("只能使用已配置的管理分类")
 			}
 			params["auto_tmm"] = true
 			delete(params, "save_path")
-		} else {
+		}
+		if op == "action" {
+			torrents, err := a.qbit(ctx, d, "torrents", Object{})
+			if err != nil {
+				return nil, err
+			}
+			allowed := map[string]bool{}
+			for _, torrent := range asObjects(torrents) {
+				allowed[strings.ToLower(str(torrent["hash"]))] = true
+			}
+			hashes := stringSlice(params["hashes"])
+			if len(hashes) == 0 {
+				return nil, fmt.Errorf("请选择任务")
+			}
+			for _, hash := range hashes {
+				if !allowed[strings.ToLower(hash)] {
+					return nil, fmt.Errorf("只能管理已配置分类中的任务")
+				}
+			}
+			if str(params["action"]) == "category" && !contains(managedCategories, strings.TrimSpace(str(params["category"]))) {
+				return nil, fmt.Errorf("只能使用已配置的管理分类")
+			}
+		}
+	}
+	if op == "add" {
+		if str(d["management_mode"]) != "categorical" {
 			params["category"] = ""
 			params["auto_tmm"] = false
 		}
@@ -368,7 +473,21 @@ func (a *App) qbit(ctx context.Context, d Object, op string, params Object) (any
 				return nil, err
 			}
 		}
-		return a.remoteQbit(ctx, d, op, params)
+		result, err := a.remoteQbit(ctx, d, op, params)
+		if err != nil {
+			return nil, err
+		}
+		if op == "categories" && len(managedCategories) > 0 {
+			all := toObject(result)
+			filtered := Object{}
+			for _, category := range managedCategories {
+				if value, ok := all[category]; ok {
+					filtered[category] = value
+				}
+			}
+			return filtered, nil
+		}
+		return result, nil
 	}
 	q, e := integrations.NewQBittorrent(integrations.QBConfig{URL: str(d["url"]), Username: str(d["username"]), Password: str(d["password"])})
 	if e != nil {
@@ -379,9 +498,25 @@ func (a *App) qbit(ctx context.Context, d Object, op string, params Object) (any
 	}
 	switch op {
 	case "torrents":
+		if categories, ok := params["categories"].([]string); ok {
+			return q.ListTorrentsInCategories(ctx, categories)
+		}
 		return q.ListTorrentsFiltered(ctx, "", tag)
 	case "categories":
-		return q.ListCategories(ctx)
+		categories, err := q.ListCategories(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if len(managedCategories) > 0 {
+			filtered := map[string]integrations.Category{}
+			for _, category := range managedCategories {
+				if value, ok := categories[category]; ok {
+					filtered[category] = value
+				}
+			}
+			return filtered, nil
+		}
+		return categories, nil
 	case "create_tags":
 		e = q.CreateTags(ctx, tag)
 	case "add":

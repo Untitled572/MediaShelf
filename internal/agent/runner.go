@@ -44,6 +44,7 @@ type qbitPayload struct {
 }
 type qbitParams struct {
 	Category      string   `json:"category"`
+	Categories    []string `json:"categories"`
 	Tag           string   `json:"tag"`
 	Action        string   `json:"action"`
 	Hashes        []string `json:"hashes"`
@@ -283,6 +284,9 @@ func (r *Runner) runQBit(ctx context.Context, p qbitPayload) (any, error) {
 	}
 	switch strings.ToLower(strings.TrimSpace(p.Operation)) {
 	case "torrents", "list":
+		if params.Categories != nil {
+			return client.ListTorrentsInCategories(ctx, params.Categories)
+		}
 		return client.ListTorrentsFiltered(ctx, params.Category, params.Tag)
 	case "categories":
 		return client.ListCategories(ctx)

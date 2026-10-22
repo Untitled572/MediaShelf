@@ -15,6 +15,28 @@ import (
 // discovery handles catalog search, actor selection, aliases, enrichment and
 // preference-based discovery routes. It returns false for routes it does not own.
 func (a *App) discovery(w http.ResponseWriter, r *http.Request, p []string) bool {
+	if len(p) == 2 && p[0] == "catalog" && p[1] == "refresh" {
+		a.refreshPublicRecommendations(w, r)
+		return true
+	}
+	if len(p) == 1 && p[0] == "recommendation-status" {
+		if r.Method != http.MethodGet {
+			fail(w, 405, "GET required")
+			return true
+		}
+		catalog, e := a.list("catalog")
+		if e != nil {
+			fail(w, 500, e.Error())
+			return true
+		}
+		checks, e := a.list("source_checks")
+		if e != nil {
+			fail(w, 500, e.Error())
+			return true
+		}
+		write(w, 200, Object{"catalog_count": len(catalog), "source_checks": checks})
+		return true
+	}
 	if len(p) == 1 && p[0] == "search" {
 		if r.Method != http.MethodPost {
 			fail(w, http.StatusMethodNotAllowed, "POST required")
@@ -31,6 +53,11 @@ func (a *App) discovery(w http.ResponseWriter, r *http.Request, p []string) bool
 			return true
 		}
 		m, err := a.lookup(r.Context(), source, query)
+		check := Object{"id": source, "source": source, "checked_at": now(), "ok": err == nil}
+		if err != nil {
+			check["error"] = err.Error()
+		}
+		_ = a.put("source_checks", check)
 		if err != nil {
 			fail(w, http.StatusBadGateway, err.Error())
 			return true
@@ -94,6 +121,13 @@ func catalogID(source, code string) string {
 
 func (a *App) lookup(ctx context.Context, source, code string) (integrations.Metadata, error) {
 	cfg, _ := a.get("sources", source)
+	if source == "javdbui" {
+		client, err := integrations.NewJavDBUIClient(integrations.CatalogConfig{BaseURL: str(cfg["base_url"]), ProxyURL: str(cfg["proxy_url"])})
+		if err != nil {
+			return integrations.Metadata{}, err
+		}
+		return client.Lookup(ctx, code)
+	}
 	c, err := integrations.NewCatalogClient(integrations.CatalogConfig{
 		Source: source, BaseURL: str(cfg["base_url"]), ProxyURL: str(cfg["proxy_url"]), Cookie: str(cfg["cookie"]),
 	})
@@ -642,6 +676,9 @@ func (a *App) preferenceRecommendations(w http.ResponseWriter, actorOnly bool) {
 		sort.Slice(out, func(i, j int) bool { return num(out[i]["score"]) > num(out[j]["score"]) })
 		if len(out) > 100 {
 			out = out[:100]
+		}
+		if len(out) == 0 {
+			out = a.providerActorRecommendations()
 		}
 		write(w, http.StatusOK, out)
 		return

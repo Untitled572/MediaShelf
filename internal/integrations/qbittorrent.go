@@ -267,6 +267,43 @@ func (q *QBittorrent) ListTorrentsFiltered(ctx context.Context, category, tag st
 	return nil, fmt.Errorf("qBittorrent torrent list exceeds the %d-item safety limit", maxTorrents)
 }
 
+// ListTorrentsInCategories queries qBittorrent once per configured category.
+// It never requests the unfiltered torrent list, and defensively verifies the
+// returned category before adding a torrent to the result.
+func (q *QBittorrent) ListTorrentsInCategories(ctx context.Context, categories []string) ([]Torrent, error) {
+	seenCategories := make(map[string]struct{}, len(categories))
+	seenHashes := make(map[string]struct{})
+	all := make([]Torrent, 0)
+	for _, category := range categories {
+		category = strings.TrimSpace(category)
+		if category == "" {
+			continue
+		}
+		if _, exists := seenCategories[category]; exists {
+			continue
+		}
+		seenCategories[category] = struct{}{}
+		torrents, err := q.ListTorrents(ctx, category)
+		if err != nil {
+			return nil, err
+		}
+		for _, torrent := range torrents {
+			if torrent.Category != category {
+				continue
+			}
+			hash := strings.ToLower(strings.TrimSpace(torrent.Hash))
+			if hash != "" {
+				if _, exists := seenHashes[hash]; exists {
+					continue
+				}
+				seenHashes[hash] = struct{}{}
+			}
+			all = append(all, torrent)
+		}
+	}
+	return all, nil
+}
+
 func hasExactTorrentTag(tags, wanted string) bool {
 	for _, tag := range strings.Split(tags, ",") {
 		if strings.TrimSpace(tag) == wanted {

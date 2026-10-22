@@ -25,7 +25,6 @@ type Object map[string]any
 type App struct {
 	db         *sql.DB
 	password   string
-	sessions   map[string]time.Time
 	mu         sync.Mutex
 	scanMu     sync.Mutex
 	downloadMu sync.Mutex
@@ -61,11 +60,11 @@ func New(data, password, web string) (*App, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	if _, err = db.Exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS documents (kind TEXT NOT NULL,id TEXT NOT NULL,body TEXT NOT NULL,PRIMARY KEY(kind,id)); PRAGMA user_version=1;`); err != nil {
+	if _, err = db.Exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS documents (kind TEXT NOT NULL,id TEXT NOT NULL,body TEXT NOT NULL,PRIMARY KEY(kind,id)); CREATE TABLE IF NOT EXISTS auth_sessions (token_hash TEXT PRIMARY KEY, expires_at TEXT NOT NULL); PRAGMA user_version=1;`); err != nil {
 		db.Close()
 		return nil, err
 	}
-	return &App{db: db, password: password, sessions: map[string]time.Time{}, dataDir: data, webDir: web}, nil
+	return &App{db: db, password: password, dataDir: data, webDir: web}, nil
 }
 func Run() error {
 	a, e := New(env("MEDIASHELF_DATA_DIR", "data"), os.Getenv("MEDIASHELF_PASSWORD"), env("MEDIASHELF_WEB_DIR", "web/dist"))
@@ -168,7 +167,27 @@ func (a *App) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.URL.Path == "/api/v1/login" {
+		w.Header().Set("Cache-Control", "no-store")
 		a.login(w, r)
+		return
+	}
+	if r.URL.Path == "/api/v1/session" {
+		w.Header().Set("Cache-Control", "no-store")
+		if r.Method != http.MethodGet {
+			fail(w, http.StatusMethodNotAllowed, "GET required")
+			return
+		}
+		if !a.authorized(r) {
+			fail(w, http.StatusUnauthorized, "请登录")
+			return
+		}
+		var expiresAt string
+		err := a.db.QueryRow("SELECT expires_at FROM auth_sessions WHERE token_hash=?", digest(bearerToken(r))).Scan(&expiresAt)
+		if err != nil {
+			fail(w, http.StatusUnauthorized, "请登录")
+			return
+		}
+		write(w, http.StatusOK, Object{"expires_at": expiresAt})
 		return
 	}
 	if strings.HasPrefix(r.URL.Path, "/api/v1/agent/") {
@@ -201,14 +220,22 @@ func (a *App) serve(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, filepath.Join(a.webDir, "index.html"))
 }
 func (a *App) authorized(r *http.Request) bool {
-	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	token := bearerToken(r)
 	if token == "" && strings.HasPrefix(r.URL.Path, "/covers/") {
 		token = r.URL.Query().Get("token")
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	exp, ok := a.sessions[digest(token)]
-	return ok && time.Now().Before(exp)
+	if token == "" {
+		return false
+	}
+	var raw string
+	if err := a.db.QueryRow("SELECT expires_at FROM auth_sessions WHERE token_hash=?", digest(token)).Scan(&raw); err != nil {
+		return false
+	}
+	expiresAt, err := time.Parse(time.RFC3339, raw)
+	return err == nil && time.Now().Before(expiresAt)
+}
+func bearerToken(r *http.Request) string {
+	return strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 }
 func (a *App) login(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
@@ -225,15 +252,16 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	token := id()
-	a.mu.Lock()
-	for k, v := range a.sessions {
-		if time.Now().After(v) {
-			delete(a.sessions, k)
-		}
+	expiresAt := time.Now().UTC().Add(48 * time.Hour).Format(time.RFC3339)
+	if _, err := a.db.Exec("DELETE FROM auth_sessions WHERE expires_at<=?", time.Now().UTC().Format(time.RFC3339)); err != nil {
+		fail(w, http.StatusInternalServerError, "会话创建失败")
+		return
 	}
-	a.sessions[digest(token)] = time.Now().Add(24 * time.Hour)
-	a.mu.Unlock()
-	write(w, 200, Object{"token": token})
+	if _, err := a.db.Exec("INSERT INTO auth_sessions(token_hash,expires_at) VALUES(?,?)", digest(token), expiresAt); err != nil {
+		fail(w, http.StatusInternalServerError, "会话创建失败")
+		return
+	}
+	write(w, http.StatusOK, Object{"token": token, "expires_at": expiresAt})
 }
 func (a *App) api(w http.ResponseWriter, r *http.Request) {
 	p := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/"), "/"), "/")

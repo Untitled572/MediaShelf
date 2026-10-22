@@ -384,7 +384,30 @@ func (r *Runner) scanLibrary(ctx context.Context, id string, remote **RemoteConf
 				}
 			}
 		}
+		for actor, actorPath := range s.Works[i].actorThumbPaths {
+			info, statErr := os.Stat(actorPath)
+			if statErr != nil {
+				r.logf("actor thumbnail stat: %v", statErr)
+				delete(s.Works[i].ActorThumbs, actor)
+				continue
+			}
+			if cached, ok := r.Journal.CachedCover(actorPath, info.Size(), info.ModTime()); ok {
+				s.Works[i].ActorThumbs[actor] = cached
+				continue
+			}
+			uploaded, uploadErr := r.Client.UploadCover(actorPath)
+			if uploadErr != nil {
+				r.logf("actor thumbnail upload: %v", uploadErr)
+				delete(s.Works[i].ActorThumbs, actor)
+				continue
+			}
+			s.Works[i].ActorThumbs[actor] = uploaded
+			if cacheErr := r.Journal.CacheCover(actorPath, info.Size(), info.ModTime(), uploaded); cacheErr != nil {
+				r.logf("cache actor thumbnail URL: %v", cacheErr)
+			}
+		}
 		s.Works[i].coverPath = ""
+		s.Works[i].actorThumbPaths = nil
 	}
 	if err := ctx.Err(); err != nil {
 		return err

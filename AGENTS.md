@@ -18,3 +18,5 @@ GET/POST /api/v1/feeds {id,name,url,include,exclude}; POST /api/v1/feeds/{id}/re
 GET /api/v1/recommendations -> [{work:Work,reason,score}]; GET /api/v1/actor-recommendations -> [{name,reason,score}]; GET /api/v1/catalog?actor=; POST /api/v1/catalog/sync {actor,source}; source adapters may return explicit unavailable, never fabricate complete.
 GET /api/v1/settings -> JSON; PATCH /api/v1/settings JSON; GET /api/v1/backup returns database export JSON, POST /api/v1/restore accepts it (confirmation UI required).
 Frontend builds dist; server serves web/dist if present via env MEDIASHELF_WEB_DIR. UI dev proxy /api -> localhost:8765. All UI Chinese.
+
+Work.actor_thumbs is an optional actor-name -> image URL map. Actor.avatar_url is resolved from scanned NFO/local avatars, with explicit actor policy override. Only HTTP(S) without URL credentials or /covers/ URLs are accepted. Actor policy PATCH is partial and preserves aliases/avatar fields. Privacy mode must remove image nodes AND image layout regions (no poster placeholders); avatar images/initials render only outside privacy mode.

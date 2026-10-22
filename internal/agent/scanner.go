@@ -4,6 +4,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -22,22 +23,25 @@ var numericPartPattern = regexp.MustCompile(`(?i)(?:_|-)(\d{3,4})(?:$|[._ -])`)
 var explicitFullPattern = regexp.MustCompile(`(?i)(?:^|[._ -])(?:full|complete)(?:$|[._ -])`)
 
 type Work struct {
-	ID               string    `json:"id,omitempty"`
-	Code             string    `json:"code"`
-	Title            string    `json:"title"`
-	Year             *int      `json:"year,omitempty"`
-	Actors           []string  `json:"actors"`
-	Tags             []string  `json:"tags"`
-	Rating           *float64  `json:"rating"`
-	SourceRating     *float64  `json:"source_rating"`
-	CoverURL         string    `json:"cover_url,omitempty"`
-	SourceURL        string    `json:"source_url,omitempty"`
-	HasNFO           bool      `json:"has_nfo"`
-	Kind             string    `json:"kind"`
-	CollectionStatus string    `json:"collection_status,omitempty"`
-	Files            []File    `json:"files"`
-	Progress         *Progress `json:"progress,omitempty"`
+	ID               string            `json:"id,omitempty"`
+	Code             string            `json:"code"`
+	Title            string            `json:"title"`
+	Year             *int              `json:"year,omitempty"`
+	Actors           []string          `json:"actors"`
+	ActorThumbs      map[string]string `json:"actor_thumbs,omitempty"`
+	Tags             []string          `json:"tags"`
+	Rating           *float64          `json:"rating"`
+	SourceRating     *float64          `json:"source_rating"`
+	CoverURL         string            `json:"cover_url,omitempty"`
+	SourceURL        string            `json:"source_url,omitempty"`
+	HasNFO           bool              `json:"has_nfo"`
+	Kind             string            `json:"kind"`
+	CollectionStatus string            `json:"collection_status,omitempty"`
+	Files            []File            `json:"files"`
+	Progress         *Progress         `json:"progress,omitempty"`
 	coverPath        string
+	actorThumbPaths  map[string]string
+	actorThumbRanks  map[string]int
 	nfoPriority      int
 }
 type File struct {
@@ -71,7 +75,8 @@ type nfoData struct {
 	ID            string   `xml:"id"`
 	UniqueIDs     []nfoID  `xml:"uniqueid"`
 	Actors        []struct {
-		Name string `xml:"name"`
+		Name  string `xml:"name"`
+		Thumb string `xml:"thumb"`
 	} `xml:"actor"`
 	Genres    []string `xml:"genre"`
 	Rating    string   `xml:"rating"`
@@ -154,7 +159,7 @@ func ScanLibrary(libraryID, root string) ScanResult {
 				year = yearFrom(data.Premiered)
 			}
 			priority := nfoPriority(fileMetaOK, folderOK)
-			work = &Work{Code: code, Title: title, Year: yearPtr(year), Actors: []string{}, Tags: unique(data.Genres), Kind: kind, Files: []File{}, HasNFO: fileMetaOK || folderOK, nfoPriority: priority}
+			work = &Work{Code: code, Title: title, Year: yearPtr(year), Actors: []string{}, ActorThumbs: map[string]string{}, actorThumbPaths: map[string]string{}, actorThumbRanks: map[string]int{}, Tags: unique(data.Genres), Kind: kind, Files: []File{}, HasNFO: fileMetaOK || folderOK, nfoPriority: priority}
 			work.SourceRating = floatPtr(data.Rating)
 			work.SourceURL = firstNonBlank(data.Website, data.URL)
 			thumb := ""
@@ -162,6 +167,7 @@ func ScanLibrary(libraryID, root string) ScanResult {
 				thumb = data.Thumb[0]
 			}
 			work.coverPath = findCover(rootAbs, dir, stem, thumb)
+			addNFOActorThumbs(work, data.Actors, rootAbs, dir, priority)
 			for _, a := range data.Actors {
 				if strings.TrimSpace(a.Name) != "" {
 					work.Actors = append(work.Actors, strings.TrimSpace(a.Name))
@@ -185,6 +191,13 @@ func ScanLibrary(libraryID, root string) ScanResult {
 		}
 		version, mediaKind := inferMediaHints(path, code)
 		work.Files = append(work.Files, File{LibraryID: libraryID, RelativePath: filepath.ToSlash(rel), Size: st.Size(), ModifiedAt: st.ModTime().Format(time.RFC3339), Version: version, MediaKind: mediaKind, Missing: false})
+		if work.ActorThumbs == nil {
+			work.ActorThumbs = map[string]string{}
+		}
+		if work.actorThumbPaths == nil {
+			work.actorThumbPaths = map[string]string{}
+		}
+		addNFOActorThumbs(work, data.Actors, rootAbs, dir, nfoPriority(fileMetaOK, folderOK))
 	}
 	for _, w := range groups {
 		result.Works = append(result.Works, *w)
@@ -231,6 +244,7 @@ func mergeNFOIntoWork(work *Work, data nfoData, root, dir, stem string, priority
 			}
 		}
 	}
+	addNFOActorThumbs(work, data.Actors, root, dir, priority)
 	if prefer || len(work.Tags) == 0 {
 		work.Tags = unique(append(work.Tags, data.Genres...))
 	}
@@ -250,6 +264,111 @@ func mergeNFOIntoWork(work *Work, data nfoData, root, dir, stem string, priority
 	if priority > work.nfoPriority {
 		work.nfoPriority = priority
 	}
+}
+
+func addNFOActorThumbs(work *Work, actors []struct {
+	Name  string `xml:"name"`
+	Thumb string `xml:"thumb"`
+}, root, dir string, priority int) {
+	if work.ActorThumbs == nil {
+		work.ActorThumbs = map[string]string{}
+	}
+	if work.actorThumbPaths == nil {
+		work.actorThumbPaths = map[string]string{}
+	}
+	if work.actorThumbRanks == nil {
+		work.actorThumbRanks = map[string]int{}
+	}
+	for _, actor := range actors {
+		name := strings.TrimSpace(actor.Name)
+		if name == "" {
+			continue
+		}
+		if value, local, ok := resolveActorThumb(root, dir, actor.Thumb, name); ok && priority >= work.actorThumbRanks[name] {
+			work.ActorThumbs[name] = value
+			work.actorThumbRanks[name] = priority
+			if local {
+				work.actorThumbPaths[name] = value
+			} else {
+				delete(work.actorThumbPaths, name)
+			}
+		}
+	}
+}
+
+func resolveActorThumb(root, dir, raw, actor string) (string, bool, bool) {
+	if strings.TrimSpace(raw) != "" {
+		if parsed, err := url.Parse(strings.TrimSpace(raw)); err == nil && parsed.IsAbs() {
+			if (strings.EqualFold(parsed.Scheme, "http") || strings.EqualFold(parsed.Scheme, "https")) && parsed.Host != "" && parsed.User == nil {
+				return parsed.String(), false, true
+			}
+		} else if p, ok := safeLibraryImagePath(root, dir, raw); ok {
+			return p, true, true
+		}
+	}
+	if strings.ContainsAny(actor, `/\\:`) || actor == "." || actor == ".." {
+		return "", false, false
+	}
+	for _, base := range []string{filepath.Join(dir, ".actors"), filepath.Join(filepath.Dir(dir), ".actors")} {
+		for _, ext := range []string{".jpg", ".jpeg", ".png", ".webp"} {
+			if p, ok := validateLibraryImagePath(root, filepath.Join(base, actor+ext)); ok {
+				return p, true, true
+			}
+		}
+	}
+	return "", false, false
+}
+
+func safeLibraryImagePath(root, dir, raw string) (string, bool) {
+	if strings.TrimSpace(raw) == "" || strings.Contains(raw, ":") {
+		return "", false
+	}
+	raw = strings.ReplaceAll(raw, `\`, string(filepath.Separator))
+	if filepath.IsAbs(raw) || filepath.VolumeName(raw) != "" {
+		return "", false
+	}
+	clean := filepath.Clean(raw)
+	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return validateLibraryImagePath(root, filepath.Join(dir, clean))
+}
+
+func validateLibraryImagePath(root, candidate string) (string, bool) {
+	base, err := filepath.Abs(root)
+	if err != nil {
+		return "", false
+	}
+	base, err = filepath.EvalSymlinks(base)
+	if err != nil {
+		return "", false
+	}
+	abs, err := filepath.Abs(candidate)
+	if err != nil {
+		return "", false
+	}
+	rel, err := filepath.Rel(root, abs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", false
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", false
+	}
+	resolvedRel, err := filepath.Rel(base, resolved)
+	if err != nil || resolvedRel == ".." || strings.HasPrefix(resolvedRel, ".."+string(filepath.Separator)) || filepath.IsAbs(resolvedRel) {
+		return "", false
+	}
+	st, err := os.Stat(resolved)
+	if err != nil || st.IsDir() {
+		return "", false
+	}
+	switch strings.ToLower(filepath.Ext(resolved)) {
+	case ".jpg", ".jpeg", ".png", ".webp":
+	default:
+		return "", false
+	}
+	return resolved, true
 }
 
 func appendUniqueString(values []string, value string) []string {

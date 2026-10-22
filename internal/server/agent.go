@@ -267,6 +267,7 @@ func (a *App) importScan(w http.ResponseWriter, dev string, o Object) {
 		if !flag(manual["cover_url"]) && str(incoming["cover_url"]) != "" && (incomingHasNFO || !existingHasNFO || str(existing["cover_url"]) == "") {
 			existing["cover_url"] = incoming["cover_url"]
 		}
+		mergeActorThumbs(existing, incoming)
 		existing["has_nfo"] = existingHasNFO || incomingHasNFO
 		efs := asObjects(existing["files"])
 		for _, f := range files {

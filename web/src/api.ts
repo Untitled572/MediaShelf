@@ -1,7 +1,7 @@
-export type Work={id:string;code:string;title:string;year?:number;actors:string[];tags:string[];rating:number|null;source_rating?:number|null;cover_url?:string;source_url?:string;kind?:string;collection_status?:string;files?:FileItem[];progress?:Progress}
+export type Work={id:string;code:string;title:string;year?:number;actors:string[];actor_thumbs?:Record<string,string>;tags:string[];rating:number|null;source_rating?:number|null;cover_url?:string;source_url?:string;kind?:string;collection_status?:string;files?:FileItem[];progress?:Progress}
 export type FileItem={id:string;device_id:string;library_id:string;relative_path:string;size:number;modified_at:string;version?:string;missing:boolean;progress:Progress}
 export type Progress={compression:string;cutting:string;translation:string;verified:boolean}
-export type Actor={name:string;count:number;policy:string;target:number}
+export type Actor={name:string;count:number;policy:string;target:number;avatar_url?:string}
 export type Device={id:string;name:string;online:boolean;last_seen:string}
 export type Library={id:string;device_id:string;name:string;path:string;openlist_base?:string;openlist_prefix?:string}
 export type Job={id:string;device_id:string;type:string;payload:unknown;status:string;result?:string;created_at:string}

@@ -9,11 +9,13 @@ import (
 	"image/jpeg"
 	_ "image/png"
 	"os"
+
+	_ "golang.org/x/image/webp"
 )
 
 const maxCoverPixels = 40_000_000
 
-// MakeCoverThumbnail decodes only bounded JPEG/PNG inputs and returns a JPEG
+// MakeCoverThumbnail decodes only bounded JPEG/PNG/WebP inputs and returns a JPEG
 // no larger than 400x600. Source images are never modified.
 func MakeCoverThumbnail(path string) ([]byte, error) {
 	f, err := os.Open(path)

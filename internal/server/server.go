@@ -494,6 +494,21 @@ func (a *App) actorsAPI(w http.ResponseWriter, r *http.Request, key string) {
 		if !ok {
 			return
 		}
+		current, _ := a.get("actor_policies", key)
+		if current == nil {
+			current = Object{"policy": "follow", "target": 2}
+		}
+		if raw, exists := o["avatar_url"]; exists {
+			if str(raw) != "" && avatarURL(str(raw)) == "" {
+				fail(w, 400, "头像地址必须为 HTTP(S) 或已上传的图片")
+				return
+			}
+			o["avatar_url"] = avatarURL(str(raw))
+		}
+		for k, v := range o {
+			current[k] = v
+		}
+		o = current
 		s := str(o["policy"])
 		if s != "complete" && s != "selective" && s != "follow" {
 			fail(w, 400, "策略无效")
@@ -522,6 +537,7 @@ func (a *App) actorsAPI(w http.ResponseWriter, r *http.Request, key string) {
 		}
 	}
 	policies, _ := a.list("actor_policies")
+	avatars := actorAvatars(ws, policies)
 	for _, p := range policies {
 		n := str(p["name"])
 		if _, ok := actors[n]; !ok {
@@ -535,6 +551,7 @@ func (a *App) actorsAPI(w http.ResponseWriter, r *http.Request, key string) {
 			o = Object{"name": n, "policy": "follow", "target": 2}
 		}
 		o["count"] = c
+		o["avatar_url"] = avatars[n]
 		out = append(out, o)
 	}
 	write(w, 200, out)

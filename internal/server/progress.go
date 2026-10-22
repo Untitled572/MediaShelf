@@ -101,7 +101,7 @@ func aggregateProgress(files []Object) Object {
 	result := defaultProgress()
 	available := []Object{}
 	for _, f := range files {
-		if !flag(f["missing"]) {
+		if !flag(f["missing"]) && !flag(f["scoped_out"]) {
 			available = append(available, f)
 		}
 	}

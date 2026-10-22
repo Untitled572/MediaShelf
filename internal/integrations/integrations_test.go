@@ -287,6 +287,87 @@ func TestQBittorrentListUsesCategoryQueryAndKeepsRates(t *testing.T) {
 	}
 }
 
+func TestQBittorrentListFilteredPaginatesAndMatchesExactTag(t *testing.T) {
+	var offsets []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if r.URL.Path != "/api/v2/torrents/info" || q.Get("category") != "vr" || q.Get("tag") != "action" {
+			http.Error(w, "missing category or tag filter", http.StatusBadRequest)
+			return
+		}
+		offset := q.Get("offset")
+		offsets = append(offsets, offset)
+		switch offset {
+		case "0":
+			var b strings.Builder
+			b.WriteByte('[')
+			for i := 0; i < 250; i++ {
+				if i > 0 {
+					b.WriteByte(',')
+				}
+				tags := "other"
+				if i == 2 {
+					tags = " other, action , comedy "
+				}
+				if i == 3 {
+					tags = "actionable"
+				}
+				fmt.Fprintf(&b, `{"hash":"first-%d","tags":%q}`, i, tags)
+			}
+			b.WriteByte(']')
+			_, _ = io.WriteString(w, b.String())
+		case "250":
+			_, _ = io.WriteString(w, `[{"hash":"second","tags":"action"}]`)
+		default:
+			http.Error(w, "unexpected offset", http.StatusBadRequest)
+		}
+	}))
+	defer srv.Close()
+	client, err := NewQBittorrent(QBConfig{URL: srv.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := client.ListTorrentsFiltered(context.Background(), "vr", " action ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(offsets, ",") != "0,250" {
+		t.Fatalf("page offsets = %v, want [0 250]", offsets)
+	}
+	if len(got) != 2 || got[0].Hash != "first-2" || got[1].Hash != "second" {
+		t.Fatalf("exact tag filtering returned %#v", got)
+	}
+}
+
+func TestQBittorrentCreateTagsPostsTagsAndReturnsErrors(t *testing.T) {
+	var gotForm url.Values
+	status := http.StatusOK
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v2/torrents/createTags" {
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+			return
+		}
+		_ = r.ParseForm()
+		gotForm = r.Form
+		w.WriteHeader(status)
+	}))
+	defer srv.Close()
+	client, err := NewQBittorrent(QBConfig{URL: srv.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = client.CreateTags(context.Background(), "action, comedy"); err != nil {
+		t.Fatal(err)
+	}
+	if gotForm.Get("tags") != "action, comedy" {
+		t.Fatalf("posted tags = %q", gotForm.Get("tags"))
+	}
+	status = http.StatusInternalServerError
+	if err = client.CreateTags(context.Background(), "broken"); err == nil || !strings.Contains(err.Error(), "HTTP 500") {
+		t.Fatalf("CreateTags error = %v, want HTTP 500", err)
+	}
+}
+
 func TestQBittorrentCategoriesAndAutoTMMAdd(t *testing.T) {
 	var gotForm url.Values
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

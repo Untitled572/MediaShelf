@@ -221,9 +221,14 @@ func (q *QBittorrent) apiVersion(ctx context.Context) (int, error) {
 	return major*100 + minor, nil
 }
 func (q *QBittorrent) ListTorrents(ctx context.Context, category string) ([]Torrent, error) {
+	return q.ListTorrentsFiltered(ctx, category, "")
+}
+
+func (q *QBittorrent) ListTorrentsFiltered(ctx context.Context, category, tag string) ([]Torrent, error) {
 	const initialPageSize = 250
 	const maxTorrents = 50000
 	all := make([]Torrent, 0)
+	wantedTag := strings.TrimSpace(tag)
 	offset, pageSize := 0, initialPageSize
 	for offset < maxTorrents {
 		v := url.Values{}
@@ -233,6 +238,9 @@ func (q *QBittorrent) ListTorrents(ctx context.Context, category string) ([]Torr
 		v.Set("reverse", "false")
 		if category != "" {
 			v.Set("category", category)
+		}
+		if wantedTag != "" {
+			v.Set("tag", wantedTag)
 		}
 		var page []Torrent
 		if err := q.request(ctx, http.MethodGet, "torrents/info?"+v.Encode(), nil, &page); err != nil {
@@ -245,13 +253,27 @@ func (q *QBittorrent) ListTorrents(ctx context.Context, category string) ([]Torr
 			}
 			return nil, err
 		}
-		all = append(all, page...)
-		offset += len(page)
-		if len(page) < pageSize {
+		pageLength := len(page)
+		for _, torrent := range page {
+			if wantedTag == "" || hasExactTorrentTag(torrent.Tags, wantedTag) {
+				all = append(all, torrent)
+			}
+		}
+		offset += pageLength
+		if pageLength < pageSize {
 			return all, nil
 		}
 	}
 	return nil, fmt.Errorf("qBittorrent torrent list exceeds the %d-item safety limit", maxTorrents)
+}
+
+func hasExactTorrentTag(tags, wanted string) bool {
+	for _, tag := range strings.Split(tags, ",") {
+		if strings.TrimSpace(tag) == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 func (q *QBittorrent) ListCategories(ctx context.Context) (map[string]Category, error) {
@@ -357,6 +379,9 @@ func (q *QBittorrent) SetTags(ctx context.Context, hashes []string, tags string)
 		return e
 	}
 	return q.request(ctx, http.MethodPost, "torrents/addTags", url.Values{"hashes": {hs}, "tags": {tags}}, nil)
+}
+func (q *QBittorrent) CreateTags(ctx context.Context, tags string) error {
+	return q.request(ctx, http.MethodPost, "torrents/createTags", url.Values{"tags": {tags}}, nil)
 }
 func (q *QBittorrent) SetLimits(ctx context.Context, hashes []string, download, upload int64) error {
 	_, e := hashesValue(hashes)

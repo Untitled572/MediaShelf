@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -212,10 +213,24 @@ func asObjects(v any) []Object {
 	return out
 }
 func (a *App) importScan(w http.ResponseWriter, dev string, o Object) {
+	a.scanMu.Lock()
+	defer a.scanMu.Unlock()
 	lib := str(o["library_id"])
 	l, e := a.get("libraries", lib)
 	if e != nil || str(l["device_id"]) != dev {
 		fail(w, 403, "片库不属于设备")
+		return
+	}
+	requestedRoot := str(o["root"])
+	configuredRoot := str(l["path"])
+	if requestedRoot != "" && !sameLibraryRoot(requestedRoot, configuredRoot) {
+		fail(w, 409, "扫描根目录与服务端片库路径不一致")
+		return
+	}
+	// Older agents do not send their scanned root. They remain usable until a
+	// configured library path changes; after that, reject their ambiguous scan.
+	if requestedRoot == "" && str(l["scan_root"]) != "" && !sameLibraryRoot(str(l["scan_root"]), configuredRoot) {
+		fail(w, 409, "代理版本过旧，无法确认扫描根目录")
 		return
 	}
 	items, ok := o["works"].([]any)
@@ -223,9 +238,7 @@ func (a *App) importScan(w http.ResponseWriter, dev string, o Object) {
 		fail(w, 400, "works 必须为数组")
 		return
 	}
-	a.scanMu.Lock()
-	defer a.scanMu.Unlock()
-	all, e := a.list("works")
+	all, e := a.listAll("works")
 	if e != nil {
 		fail(w, 500, e.Error())
 		return
@@ -234,8 +247,30 @@ func (a *App) importScan(w http.ResponseWriter, dev string, o Object) {
 	for _, x := range all {
 		byKey[str(x["id"])] = x
 	}
+	// Keep the root used by the last complete scan. A library ID can be
+	// repointed at a narrower root, which should archive its old files instead
+	// of treating them as missing from the new scope.
+	currentRoot := filepath.Clean(filepath.FromSlash(str(l["path"])))
+	previousRoot := filepath.Clean(filepath.FromSlash(str(l["scan_root"])))
+	rootChanged := str(l["scan_root"]) != "" && !sameLibraryRoot(previousRoot, currentRoot)
 	seen := map[string]bool{}
 	updates := map[string]Object{}
+	if rootChanged {
+		for k, x := range byKey {
+			fs := asObjects(x["files"])
+			changed := false
+			for _, f := range fs {
+				if str(f["device_id"]) == dev && str(f["library_id"]) == lib && !flag(f["scoped_out"]) {
+					f["scoped_out"] = true
+					changed = true
+				}
+			}
+			if changed {
+				x["files"] = fs
+				updates[k] = x
+			}
+		}
+	}
 	for _, raw := range items {
 		incoming, ok := raw.(map[string]any)
 		if !ok {
@@ -279,8 +314,13 @@ func (a *App) importScan(w http.ResponseWriter, dev string, o Object) {
 			}
 			f["device_id"] = dev
 			f["library_id"] = lib
-			f["id"] = digest(dev + "|" + lib + "|" + strings.ToLower(rel))
+			identityRoot := ""
+			if rootChanged || flag(l["root_scoped_ids"]) {
+				identityRoot = canonicalLibraryRoot(str(l["path"]))
+			}
+			f["id"] = scanFileID(dev, lib, identityRoot, rel)
 			f["missing"] = false
+			f["scoped_out"] = false
 			seen[str(f["id"])] = true
 			found := false
 			for i, old := range efs {
@@ -304,11 +344,15 @@ func (a *App) importScan(w http.ResponseWriter, dev string, o Object) {
 		byKey[workID] = existing
 	}
 	if flag(o["complete"]) {
+		l["scan_root"] = str(l["path"])
+		if rootChanged {
+			l["root_scoped_ids"] = true
+		}
 		for k, x := range byKey {
 			fs := asObjects(x["files"])
 			changed := false
 			for _, f := range fs {
-				if str(f["device_id"]) == dev && str(f["library_id"]) == lib && !seen[str(f["id"])] {
+				if str(f["device_id"]) == dev && str(f["library_id"]) == lib && !seen[str(f["id"])] && !flag(f["scoped_out"]) {
 					f["missing"] = true
 					changed = true
 				}
@@ -333,9 +377,61 @@ func (a *App) importScan(w http.ResponseWriter, dev string, o Object) {
 			return
 		}
 	}
+	if flag(o["complete"]) {
+		b, _ := json.Marshal(l)
+		if _, e = tx.Exec("INSERT INTO documents(kind,id,body) VALUES('libraries',?,?) ON CONFLICT(kind,id) DO UPDATE SET body=excluded.body", l["id"], string(b)); e != nil {
+			fail(w, 500, e.Error())
+			return
+		}
+	}
 	if e = tx.Commit(); e != nil {
 		fail(w, 500, e.Error())
 		return
 	}
 	write(w, 200, Object{"imported": len(items), "complete": flag(o["complete"])})
+}
+
+func scanFileID(deviceID, libraryID, root, relativePath string) string {
+	if root == "" {
+		return digest(deviceID + "|" + libraryID + "|" + strings.ToLower(relativePath))
+	}
+	return digest(deviceID + "|" + libraryID + "|" + libraryRootCaseKey(root) + "|" + strings.ToLower(relativePath))
+}
+
+func sameLibraryRoot(a, b string) bool {
+	a = canonicalLibraryRoot(a)
+	b = canonicalLibraryRoot(b)
+	if caseInsensitiveLibraryRoot(a) && caseInsensitiveLibraryRoot(b) {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
+}
+
+func caseInsensitiveLibraryRoot(root string) bool {
+	return isWindowsLibraryRoot(root) || strings.HasPrefix(root, "//")
+}
+
+func libraryRootCaseKey(root string) string {
+	root = canonicalLibraryRoot(root)
+	if caseInsensitiveLibraryRoot(root) {
+		return strings.ToLower(root)
+	}
+	return root
+}
+
+func canonicalLibraryRoot(root string) string {
+	root = strings.TrimSpace(strings.ReplaceAll(root, `\`, "/"))
+	if root == "" {
+		return ""
+	}
+	unc := strings.HasPrefix(root, "//")
+	clean := path.Clean(root)
+	if unc {
+		return "//" + strings.TrimLeft(clean, "/")
+	}
+	return clean
+}
+
+func isWindowsLibraryRoot(root string) bool {
+	return len(root) >= 3 && ((root[0] >= 'a' && root[0] <= 'z') || (root[0] >= 'A' && root[0] <= 'Z')) && root[1] == ':' && root[2] == '/'
 }

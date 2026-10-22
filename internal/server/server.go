@@ -103,6 +103,22 @@ func (a *App) get(kind, key string) (Object, error) {
 	return o, e
 }
 func (a *App) list(kind string) ([]Object, error) {
+	out, err := a.listAll(kind)
+	if err != nil || kind != "works" {
+		return out, err
+	}
+	visible := make([]Object, 0, len(out))
+	for _, work := range out {
+		if !exclusivelyScopedOut(work) {
+			visible = append(visible, visibleWork(work))
+		}
+	}
+	return visible, nil
+}
+
+// listAll is used by backup and scan merging, where archived work documents
+// must remain recoverable and retain their manual metadata.
+func (a *App) listAll(kind string) ([]Object, error) {
 	rows, e := a.db.Query("SELECT body FROM documents WHERE kind=? ORDER BY id", kind)
 	if e != nil {
 		return nil, e
@@ -311,6 +327,10 @@ func (a *App) listResponse(w http.ResponseWriter, kind string) {
 	write(w, 200, v)
 }
 func (a *App) configAPI(w http.ResponseWriter, r *http.Request, kind, key string) {
+	if kind == "libraries" {
+		a.scanMu.Lock()
+		defer a.scanMu.Unlock()
+	}
 	if r.Method == "GET" {
 		a.listResponse(w, kind)
 		return
@@ -325,6 +345,22 @@ func (a *App) configAPI(w http.ResponseWriter, r *http.Request, kind, key string
 	}
 	if key != "" {
 		o["id"] = key
+	}
+	if kind == "libraries" {
+		// These fields belong to the scanner. Preserve them across UI edits
+		// and ignore attempts to supply them in a library update.
+		if existing, err := a.get("libraries", str(o["id"])); err == nil {
+			for _, field := range []string{"scan_root", "root_scoped_ids"} {
+				if value, exists := existing[field]; exists {
+					o[field] = value
+				} else {
+					delete(o, field)
+				}
+			}
+		} else {
+			delete(o, "scan_root")
+			delete(o, "root_scoped_ids")
+		}
 	}
 	if str(o["device_id"]) == "" || str(o["path"]) == "" {
 		fail(w, 400, "需要设备和路径")
@@ -385,7 +421,11 @@ func (a *App) worksAPI(w http.ResponseWriter, r *http.Request, key string) {
 				fail(w, 404, "作品不存在")
 				return
 			}
-			write(w, 200, o)
+			if exclusivelyScopedOut(o) {
+				fail(w, 404, "作品不在当前片库范围")
+				return
+			}
+			write(w, 200, visibleWork(o))
 			return
 		}
 		items, e := a.list("works")
@@ -396,6 +436,9 @@ func (a *App) worksAPI(w http.ResponseWriter, r *http.Request, key string) {
 		out := []Object{}
 		q := strings.ToLower(r.URL.Query().Get("q"))
 		for _, o := range items {
+			if exclusivelyScopedOut(o) {
+				continue
+			}
 			b, _ := json.Marshal(o)
 			if q != "" && !strings.Contains(strings.ToLower(string(b)), q) {
 				continue
@@ -463,7 +506,7 @@ func (a *App) worksAPI(w http.ResponseWriter, r *http.Request, key string) {
 	if pr, ok := patch["progress"]; ok {
 		fs := asObjects(o["files"])
 		for _, f := range fs {
-			if !flag(f["missing"]) {
+			if !flag(f["missing"]) && !flag(f["scoped_out"]) {
 				f["progress"] = pr
 			}
 		}
@@ -471,6 +514,32 @@ func (a *App) worksAPI(w http.ResponseWriter, r *http.Request, key string) {
 	}
 	a.saveResponse(w, "works", o)
 }
+
+func exclusivelyScopedOut(work Object) bool {
+	files := asObjects(work["files"])
+	if len(files) == 0 {
+		return false
+	}
+	for _, f := range files {
+		if !flag(f["scoped_out"]) {
+			return false
+		}
+	}
+	return true
+}
+
+func visibleWork(work Object) Object {
+	files := asObjects(work["files"])
+	visible := make([]Object, 0, len(files))
+	for _, file := range files {
+		if !flag(file["scoped_out"]) {
+			visible = append(visible, file)
+		}
+	}
+	work["files"] = visible
+	return work
+}
+
 func contains(v any, s string) bool {
 	switch x := v.(type) {
 	case []any:
@@ -563,7 +632,7 @@ func (a *App) backup(w http.ResponseWriter, r *http.Request) {
 	}
 	result := Object{"schema_version": 1, "created_at": now()}
 	for _, kind := range []string{"works", "actor_policies", "catalog", "feeds", "candidates", "settings", "libraries", "tools"} {
-		v, e := a.list(kind)
+		v, e := a.listAll(kind)
 		if e != nil {
 			fail(w, 500, e.Error())
 			return

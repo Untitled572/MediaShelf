@@ -44,6 +44,7 @@ type qbitPayload struct {
 }
 type qbitParams struct {
 	Category      string   `json:"category"`
+	Tag           string   `json:"tag"`
 	Action        string   `json:"action"`
 	Hashes        []string `json:"hashes"`
 	DeleteFiles   bool     `json:"delete_files"`
@@ -282,7 +283,7 @@ func (r *Runner) runQBit(ctx context.Context, p qbitPayload) (any, error) {
 	}
 	switch strings.ToLower(strings.TrimSpace(p.Operation)) {
 	case "torrents", "list":
-		return client.ListTorrents(ctx, params.Category)
+		return client.ListTorrentsFiltered(ctx, params.Category, params.Tag)
 	case "categories":
 		return client.ListCategories(ctx)
 	case "action":
@@ -314,6 +315,14 @@ func (r *Runner) runQBit(ctx context.Context, p qbitPayload) (any, error) {
 			return nil, errors.New("torrent URL is required")
 		}
 		if err = client.Add(ctx, integrations.AddTorrent{URL: params.URL, SavePath: params.SavePath, Category: params.Category, Tags: params.Tags, Paused: params.Paused, AutoTMM: params.AutoTMM}); err != nil {
+			return nil, err
+		}
+		return map[string]any{"ok": true}, nil
+	case "create_tags":
+		if strings.TrimSpace(params.Tags) == "" {
+			return nil, errors.New("at least one tag is required")
+		}
+		if err = client.CreateTags(ctx, params.Tags); err != nil {
 			return nil, err
 		}
 		return map[string]any{"ok": true}, nil
@@ -357,15 +366,19 @@ func (r *Runner) scanLibrary(ctx context.Context, id string, remote **RemoteConf
 	if err != nil {
 		return err
 	}
-	if !remoteHasLibrary(rc, id) {
+	remoteLibrary, ok := findRemoteLibrary(rc, id)
+	if !ok {
 		return fmt.Errorf("library %q is not present in server device config", id)
+	}
+	if !samePath(root, remoteLibrary.Path) {
+		return fmt.Errorf("library %q local root %q does not match server path %q", id, root, remoteLibrary.Path)
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	s := ScanLibrary(id, root)
 	if !s.Complete {
-		_ = r.Client.Scan(id, false, []Work{})
+		_ = r.Client.ScanRoot(id, root, false, []Work{})
 		return s.Error()
 	}
 	for i := range s.Works {
@@ -412,7 +425,7 @@ func (r *Runner) scanLibrary(ctx context.Context, id string, remote **RemoteConf
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := r.Client.Scan(id, true, s.Works); err != nil {
+	if err := r.Client.ScanRoot(id, root, true, s.Works); err != nil {
 		return err
 	}
 	return nil
@@ -473,6 +486,14 @@ func remoteHasLibrary(c *RemoteConfig, id string) bool {
 		}
 	}
 	return false
+}
+func findRemoteLibrary(c *RemoteConfig, id string) (RemoteLibrary, bool) {
+	for _, l := range c.Libraries {
+		if l.ID == id {
+			return l, true
+		}
+	}
+	return RemoteLibrary{}, false
 }
 func samePath(a, b string) bool {
 	if strings.TrimSpace(a) == "" || strings.TrimSpace(b) == "" {

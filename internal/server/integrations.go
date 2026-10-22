@@ -215,6 +215,14 @@ func (a *App) downloadersAPI(w http.ResponseWriter, r *http.Request, p []string)
 				old, _ := a.get("downloaders", str(o["id"]))
 				o["password"] = old["password"]
 			}
+			if str(o["management_mode"]) == "uncategorized" {
+				tag := downloaderTag(o)
+				if len(tag) > 100 || strings.ContainsAny(tag, ",|\r\n") {
+					fail(w, 400, "管理标签必须为单个标签，不能包含逗号、竖线或换行")
+					return
+				}
+				o["managed_tag"] = tag
+			}
 			if e := a.put("downloaders", o); e != nil {
 				fail(w, 500, e.Error())
 				return
@@ -281,9 +289,66 @@ func stringSlice(v any) []string {
 	_ = json.Unmarshal(b, &out)
 	return out
 }
+func downloaderTag(d Object) string {
+	if str(d["management_mode"]) != "uncategorized" {
+		return ""
+	}
+	if tag := strings.TrimSpace(str(d["managed_tag"])); tag != "" {
+		return tag
+	}
+	return "MediaShelf"
+}
+
+func appendManagedTag(tags, required string) string {
+	for _, tag := range strings.Split(tags, ",") {
+		if strings.TrimSpace(tag) == required {
+			return tags
+		}
+	}
+	if strings.TrimSpace(tags) == "" {
+		return required
+	}
+	return tags + "," + required
+}
+
 func (a *App) qbit(ctx context.Context, d Object, op string, params Object) (any, error) {
 	if flag(params["delete_files"]) {
 		return nil, fmt.Errorf("仅支持删除任务并保留数据文件")
+	}
+	tag := downloaderTag(d)
+	if tag != "" {
+		if op == "categories" {
+			return Object{}, nil
+		}
+		if op == "torrents" {
+			params["tag"] = tag
+		}
+		if op == "create_tags" {
+			params["tags"] = tag
+		}
+		if op == "add" {
+			params["tags"] = appendManagedTag(str(params["tags"]), tag)
+		}
+		if op == "action" {
+			// Verify every hash against the scoped upstream list before any mutation.
+			torrents, err := a.qbit(ctx, d, "torrents", Object{})
+			if err != nil {
+				return nil, err
+			}
+			allowed := map[string]bool{}
+			for _, torrent := range asObjects(torrents) {
+				allowed[strings.ToLower(str(torrent["hash"]))] = true
+			}
+			hashes := stringSlice(params["hashes"])
+			if len(hashes) == 0 {
+				return nil, fmt.Errorf("请选择任务")
+			}
+			for _, hash := range hashes {
+				if !allowed[strings.ToLower(hash)] {
+					return nil, fmt.Errorf("只能管理带有 %s 标签的任务", tag)
+				}
+			}
+		}
 	}
 	if op == "add" {
 		if str(d["management_mode"]) == "categorical" {
@@ -298,6 +363,11 @@ func (a *App) qbit(ctx context.Context, d Object, op string, params Object) (any
 		}
 	}
 	if device := str(d["device_id"]); device != "" {
+		if op == "add" && tag != "" {
+			if _, err := a.qbit(ctx, d, "create_tags", Object{}); err != nil {
+				return nil, err
+			}
+		}
 		return a.remoteQbit(ctx, d, op, params)
 	}
 	q, e := integrations.NewQBittorrent(integrations.QBConfig{URL: str(d["url"]), Username: str(d["username"]), Password: str(d["password"])})
@@ -309,10 +379,17 @@ func (a *App) qbit(ctx context.Context, d Object, op string, params Object) (any
 	}
 	switch op {
 	case "torrents":
-		return q.ListTorrents(ctx, "")
+		return q.ListTorrentsFiltered(ctx, "", tag)
 	case "categories":
 		return q.ListCategories(ctx)
+	case "create_tags":
+		e = q.CreateTags(ctx, tag)
 	case "add":
+		if tag != "" {
+			if e = q.CreateTags(ctx, tag); e != nil {
+				return nil, e
+			}
+		}
 		e = q.Add(ctx, integrations.AddTorrent{URL: str(params["url"]), SavePath: str(params["save_path"]), Category: str(params["category"]), Tags: str(params["tags"]), Paused: false, AutoTMM: boolPointer(params["auto_tmm"])})
 	case "action":
 		hashes := stringSlice(params["hashes"])

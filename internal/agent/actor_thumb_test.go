@@ -153,7 +153,7 @@ func TestScanUploadsLocalActorThumbAndSendsServerURL(t *testing.T) {
 		t.Fatal(err)
 	}
 	runner.Journal = journal
-	rc := &RemoteConfig{Libraries: []RemoteLibrary{{ID: "lib"}}}
+	rc := &RemoteConfig{Libraries: []RemoteLibrary{{ID: "lib", Path: root}}}
 	if err := runner.scanLibrary(context.Background(), "lib", &rc); err != nil {
 		t.Fatal(err)
 	}

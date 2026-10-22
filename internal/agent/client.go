@@ -99,6 +99,9 @@ func (c *Client) Result(id, status, result string) error {
 func (c *Client) Scan(libraryID string, complete bool, works []Work) error {
 	return c.request(http.MethodPost, "/api/v1/agent/scan", map[string]any{"library_id": libraryID, "complete": complete, "works": works}, "", nil)
 }
+func (c *Client) ScanRoot(libraryID, root string, complete bool, works []Work) error {
+	return c.request(http.MethodPost, "/api/v1/agent/scan", map[string]any{"library_id": libraryID, "root": root, "complete": complete, "works": works}, "", nil)
+}
 func (c *Client) UploadCover(path string) (string, error) {
 	b, e := MakeCoverThumbnail(path)
 	if e != nil {

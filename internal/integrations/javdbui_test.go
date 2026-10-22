@@ -2,6 +2,7 @@ package integrations
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -174,5 +175,90 @@ func TestJavDBUIActorGenderPreservesMissingAndZeroValues(t *testing.T) {
 	actors := result.NewActors
 	if len(actors) != 4 || actors[0].Gender == nil || *actors[0].Gender != 0 || actors[1].Gender == nil || *actors[1].Gender != 1 || actors[2].Gender != nil || actors[3].Gender != nil {
 		t.Fatalf("gender presence was not preserved: %#v", actors)
+	}
+}
+
+func TestJavDBUIActorCatalogResolvesExactActorAndUsesPublicWorksAPI(t *testing.T) {
+	var actorPages []string
+	client := javDBUITestClient(t, func(req *http.Request) (*http.Response, error) {
+		if req.Header.Get("Cookie") != "" || req.Header.Get("Authorization") != "" {
+			t.Fatal("public actor catalog request used account credentials")
+		}
+		switch {
+		case req.URL.Path == "/api/v2/search":
+			if req.URL.Query().Get("q") != "由良かな" || req.URL.Query().Get("type") != "actor" {
+				t.Fatalf("unexpected actor search request: %s", req.URL)
+			}
+			return javDBUIJSONResponse(req, 200, `{"success":1,"data":{"actors":[{"id":"wrong","name":"由良かな子"},{"id":"A1","name":"由良かな","type":0,"videos_count":12}]}}`)
+		case req.URL.Path == "/api/v1/actors/A1":
+			return javDBUIJSONResponse(req, 200, `{"success":1,"data":{"actor":{"id":"A1","name":"由良かな","type":0},"share_info":"https://javdb580.com/actors/A1"}}`)
+		case req.URL.Path == "/api/v1/movies/tags":
+			actorPages = append(actorPages, req.URL.RawQuery)
+			q := req.URL.Query()
+			if q.Get("filter_by") != "0:a:A1:" || q.Get("sort_by") != "release" || q.Get("order_by") != "desc" || q.Get("limit") != "24" {
+				t.Fatalf("unexpected actor movie filter: %s", req.URL)
+			}
+			switch q.Get("page") {
+			case "1":
+				return javDBUIJSONResponse(req, 200, `{"success":1,"data":{"current_page":1,"has_more":true,"movies":[{"id":"M1","number":"ABC-001","title":"Page one","cover_url":"https://img.example/cover1.jpg"}]}}`)
+			case "2":
+				return javDBUIJSONResponse(req, 200, `{"success":1,"data":{"current_page":2,"has_more":false,"movies":[{"id":"M2","number":"ABC-002","title":"Page two","cover_url":"https://img.example/cover2.jpg"}]}}`)
+			default:
+				t.Fatalf("unexpected actor page: %s", req.URL)
+				return nil, nil
+			}
+		default:
+			t.Fatalf("unexpected request: %s", req.URL)
+			return nil, nil
+		}
+	})
+	page, err := client.ActorCatalog(context.Background(), "由良かな", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !page.Complete || page.HasMore || page.Page != 2 || len(page.Works) != 2 || page.Works[0].Code != "ABC-001" || page.Works[1].Code != "ABC-002" || page.Works[0].Source != "javdbui" || page.Works[0].SourceURL != "https://catembylegacy.fastcdn.dpdns.org/movie/M1" {
+		t.Fatalf("unexpected actor catalog: %#v", page)
+	}
+	if len(actorPages) != 2 || !strings.Contains(actorPages[0], "page=1") || !strings.Contains(actorPages[1], "page=2") {
+		t.Fatalf("actor API pagination was not requested: %#v", actorPages)
+	}
+}
+
+func TestJavDBUIActorCatalogRejectsSubstringAndBoundsPages(t *testing.T) {
+	client := javDBUITestClient(t, func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Path {
+		case "/api/v2/search":
+			return javDBUIJSONResponse(req, 200, `{"success":1,"data":{"actors":[{"id":"A1","name":"由良かな子"}]}}`)
+		default:
+			t.Fatalf("non-exact result should not be followed: %s", req.URL)
+			return nil, nil
+		}
+	})
+	if _, err := client.ActorCatalog(context.Background(), "由良かな", 2); err == nil || !strings.Contains(err.Error(), "exact actor match") {
+		t.Fatalf("substring actor result accepted: %v", err)
+	}
+
+	pages := 0
+	client = javDBUITestClient(t, func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.URL.Path == "/api/v2/search":
+			return javDBUIJSONResponse(req, 200, `{"success":1,"data":{"actors":[{"id":"A1","name":"由良かな","type":0}]}}`)
+		case req.URL.Path == "/api/v1/actors/A1":
+			return javDBUIJSONResponse(req, 200, `{"success":1,"data":{"actor":{"id":"A1","name":"由良かな","type":0},"share_info":"https://javdb580.com/actors/A1"}}`)
+		case req.URL.Path == "/api/v1/movies/tags":
+			pages++
+			movies := make([]string, 24)
+			for i := range movies {
+				movies[i] = fmt.Sprintf(`{"id":"M%d","number":"ABC-%03d","title":"Page"}`, i, i)
+			}
+			return javDBUIJSONResponse(req, 200, `{"success":1,"data":{"movies":[`+strings.Join(movies, ",")+`]}}`)
+		default:
+			t.Fatalf("unexpected request: %s", req.URL)
+			return nil, nil
+		}
+	})
+	page, err := client.ActorCatalog(context.Background(), "由良かな", 1)
+	if err != nil || page.Complete || !page.HasMore || page.Page != 1 || pages != 1 {
+		t.Fatalf("page budget not enforced: page=%#v requests=%d err=%v", page, pages, err)
 	}
 }

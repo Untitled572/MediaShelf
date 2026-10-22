@@ -18,6 +18,9 @@ func TestActorProfileRefreshUsesExactCanonicalNameAndCachesForOfflineGET(t *test
 			if got := r.URL.Query().Get("titles"); got != "Alice Example" {
 				t.Errorf("Wikipedia title = %q, want exact canonical actor name", got)
 			}
+			if r.URL.Query().Get("exintro") != "" || r.URL.Query().Get("exsectionformat") != "wiki" {
+				t.Errorf("Wikipedia query did not request section-marked body text: %v", r.URL.Query())
+			}
 			_, _ = w.Write([]byte(`{"query":{"pages":[{"title":"Alice Example","extract":"日本のAV女優。Public biography text.","pageprops":{"wikibase_item":"Q100"},"thumbnail":{"source":"https://upload.wikimedia.org/example.jpg"}}]}}`))
 		case "/wikidata":
 			wikidataRequests++
@@ -60,7 +63,7 @@ func TestActorProfileRefreshUsesExactCanonicalNameAndCachesForOfflineGET(t *test
 	if err := json.Unmarshal(refreshed.Body.Bytes(), &profile); err != nil {
 		t.Fatal(err)
 	}
-	if str(profile["name"]) != "Alice Example" || str(profile["description"]) != "Japanese adult film actress" || !strings.Contains(str(profile["biography"]), "Public biography text.") || str(profile["birth_date"]) != "1990-04-05" || str(profile["birth_place"]) != "Tokyo" || !contains(profile["nationality"], "Japan") || !contains(profile["aliases"], "A. Example") || str(profile["status"]) != "found" {
+	if str(profile["name"]) != "Alice Example" || str(profile["description"]) != "Japanese adult film actress" || !strings.Contains(str(profile["biography"]), "Public biography text.") || str(profile["biography_scope"]) != "lead_and_career" || flag(profile["biography_truncated"]) || str(profile["birth_date"]) != "1990-04-05" || str(profile["birth_place"]) != "Tokyo" || !contains(profile["nationality"], "Japan") || !contains(profile["aliases"], "A. Example") || str(profile["status"]) != "found" {
 		t.Fatalf("profile fields not decoded: %#v", profile)
 	}
 	links := asObjects(profile["links"])
@@ -107,6 +110,32 @@ func TestActorProfileRefreshUsesExactCanonicalNameAndCachesForOfflineGET(t *test
 	cached = req(t, a, http.MethodGet, "/api/v1/actors/Alice%20Example/profile", token, nil)
 	if err := json.Unmarshal(cached.Body.Bytes(), &profile); err != nil || str(profile["description"]) != "Japanese adult film actress" {
 		t.Fatalf("failed refresh damaged old cache: profile=%#v err=%v", profile, err)
+	}
+}
+
+func TestSelectActorBiographyExcerptKeepsNarrativeAndSkipsLists(t *testing.T) {
+	raw := "Lead biography sentence.\n\n== 略歴・人物 ==\nCareer paragraph one.\n\nCareer paragraph two.\n\n== 作品 ==\nLong film list.\n\n== 出演 ==\nPerformance list.\n\n== 脚注 ==\nReference list."
+	got, truncated := selectActorBiographyExcerpt(raw, 1200)
+	for _, want := range []string{"Lead biography sentence.", "Career paragraph one.", "Career paragraph two.", "【略歴・人物】"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("excerpt missing %q: %q", want, got)
+		}
+	}
+	for _, unwanted := range []string{"Long film list.", "Performance list.", "Reference list.", "【作品】", "【出演】", "脚注"} {
+		if strings.Contains(got, unwanted) {
+			t.Errorf("excerpt included excluded section %q: %q", unwanted, got)
+		}
+	}
+	if !truncated {
+		t.Fatal("excerpt should indicate that non-biographical sections were omitted")
+	}
+}
+
+func TestSelectActorBiographyExcerptCapsAt1200Runes(t *testing.T) {
+	raw := "Lead.\n\n== Career ==\n" + strings.Repeat("Biography text. ", 200)
+	got, truncated := selectActorBiographyExcerpt(raw, 1200)
+	if len([]rune(got)) > 1200 || !truncated {
+		t.Fatalf("excerpt cap not reported or exceeded: runes=%d truncated=%v", len([]rune(got)), truncated)
 	}
 }
 

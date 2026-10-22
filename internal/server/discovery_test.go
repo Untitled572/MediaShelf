@@ -43,6 +43,7 @@ func TestActorSelectionSeparatesRegularAndCompilationAndHonorsTarget(t *testing.
 	_ = a.put("catalog", Object{"id": "javdb:OWN-1", "source": "javdb", "code": "OWN-1", "title": "Owned work", "actors": []string{"Mika"}, "rating": 4.2})
 	_ = a.put("catalog", Object{"id": "javdb:REG-2", "source": "javdb", "code": "REG-2", "title": "Regular work", "actors": []string{"Mika"}, "rating": 4.8})
 	_ = a.put("catalog", Object{"id": "javdb:BEST-3", "source": "javdb", "code": "BEST-3", "title": "Best Of Mika Collection", "actors": []string{"Mika"}, "tags": []string{"合集"}, "rating": 5.0})
+	_ = a.put("catalog_syncs", Object{"id": "javdb:Mika", "actor": "Mika", "source": "javdb", "complete": true})
 	w := callDiscovery(t, a, http.MethodGet, []string{"actors", "Mika Tan", "selection"}, nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("selection failed: %d %s", w.Code, w.Body.String())
@@ -58,6 +59,9 @@ func TestActorSelectionSeparatesRegularAndCompilationAndHonorsTarget(t *testing.
 	cov := toObject(o["coverage"])
 	if int(num(cov["owned"])) != 1 || int(num(cov["total"])) != 3 || !flag(cov["partial"]) {
 		t.Fatalf("unexpected actor coverage: %#v", cov)
+	}
+	if !flag(cov["catalog_complete"]) || flag(cov["complete"]) {
+		t.Fatalf("catalog sync completion must not claim local collection completion while gaps remain: %#v", cov)
 	}
 }
 

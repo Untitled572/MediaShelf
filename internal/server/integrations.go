@@ -706,6 +706,10 @@ func (a *App) syncCatalog(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "需要演员名称或 ID")
 		return
 	}
+	if source == "javdbui" {
+		a.syncJavDBUICatalog(w, r, actor, o)
+		return
+	}
 	config, _ := a.get("sources", source)
 	proxyURL, e := a.outboundProxy()
 	if e != nil {

@@ -39,3 +39,7 @@
 .actor-profile-name .actor-portrait{--actor-avatar-size:64px;font-size:24px}
 .batch-toolbar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:12px 0 18px;margin-bottom:8px;border-bottom:1px solid var(--line)}.batch-toolbar label{display:flex;align-items:center;gap:8px}.batch-toolbar input,.work-select input{accent-color:var(--accent);width:16px;height:16px}.work-card{position:relative}.work-select{position:absolute;right:10px;top:10px;z-index:2;display:flex;gap:5px;align-items:center;font-size:13px;padding:5px 7px;border-radius:5px;background:#fffffff2;color:#52636c;cursor:pointer}.work-card.privacyCompact.selecting .work-code{padding-right:72px}.favorite-actor.active{color:#b58b32}.actor-toolbar>select{padding:7px 10px;border:1px solid var(--line);border-radius:6px;background:white;color:var(--white)}
 .actor-language-controls{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:12px 0;color:var(--muted);font-size:14px}
+
+.actor-profile .actor-biography{font-size:16px;line-height:1.95;margin:20px 0}.actor-profile .actor-excerpt-note{font-size:13px;color:var(--muted)}
+
+button.text-btn{border:0;background:transparent;color:#327d88;font:inherit;font-size:14px;cursor:pointer;padding:6px 8px;border-radius:5px}button.text-btn:hover{background:#eef5f5}button.text-btn:disabled{opacity:.5;cursor:default}

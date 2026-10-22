@@ -40,9 +40,192 @@ type JavDBUIActor struct {
 	Type        json.RawMessage `json:"type,omitempty"`
 	AvatarURL   string          `json:"avatar_url,omitempty"`
 	Name        string          `json:"name"`
+	NameZHT     string          `json:"name_zht,omitempty"`
 	OtherName   string          `json:"other_name,omitempty"`
 	Gender      *int            `json:"gender,omitempty"`
 	VideosCount int             `json:"videos_count,omitempty"`
+}
+
+type javDBUIActorDetail struct {
+	Actor JavDBUIActor `json:"actor"`
+}
+
+// SearchActors searches the public typed actor index.
+func (c *JavDBUIClient) SearchActors(ctx context.Context, query string) ([]JavDBUIActor, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, errors.New("actor name is required")
+	}
+	var result struct {
+		Actors []JavDBUIActor `json:"actors"`
+	}
+	params := url.Values{"q": {query}, "page": {"1"}, "type": {"actor"}}
+	if err := c.get(ctx, "/v2/search", params, &result); err != nil {
+		return nil, err
+	}
+	if result.Actors == nil {
+		return nil, errors.New("JavDB Web UI API actor search response has no actors array")
+	}
+	return result.Actors, nil
+}
+
+// ActorCatalog resolves exact actor identities through the typed public search
+// and reads works through the public /v1/movies/tags actor filter used by the
+// JavDB Web UI. maxPages is a total page budget across exact identities.
+func (c *JavDBUIClient) ActorCatalog(ctx context.Context, name string, maxPages int) (ActorPage, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ActorPage{}, errors.New("actor name is required")
+	}
+	if maxPages < 1 {
+		maxPages = 1
+	}
+	if maxPages > 50 {
+		maxPages = 50
+	}
+	searchResults, err := c.SearchActors(ctx, name)
+	if err != nil {
+		return ActorPage{}, err
+	}
+	matches := exactJavDBUIActorMatches(searchResults, name)
+	if len(matches) == 0 {
+		return ActorPage{}, fmt.Errorf("JavDB Web UI has no exact actor match for %q", name)
+	}
+	result := ActorPage{Actor: name, Works: []Metadata{}}
+	seenIDs, seenCodes := map[string]bool{}, map[string]bool{}
+	for _, match := range matches {
+		if match.ID == "" || seenIDs[match.ID] {
+			continue
+		}
+		seenIDs[match.ID] = true
+		var detail javDBUIActorDetail
+		if err := c.get(ctx, "/v1/actors/"+url.PathEscape(match.ID), nil, &detail); err != nil {
+			return result, fmt.Errorf("JavDB actor detail lookup failed: %w", err)
+		}
+		if detail.Actor.ID != match.ID || !javDBUIActorNameMatches(detail.Actor, name) {
+			return result, errors.New("JavDB actor detail identity did not match the exact search result")
+		}
+		searchType, err := javDBUIActorType(match.Type)
+		if err != nil {
+			return result, fmt.Errorf("JavDB actor search result has invalid type: %w", err)
+		}
+		detailType, err := javDBUIActorType(detail.Actor.Type)
+		if err != nil || detailType != searchType {
+			return result, errors.New("JavDB actor detail type did not match the exact search result")
+		}
+		for actorPage := 1; ; actorPage++ {
+			if result.Page >= maxPages {
+				result.HasMore = true
+				result.Complete = false
+				return result, nil
+			}
+			params := url.Values{
+				"filter_by": {searchType + ":a:" + match.ID + ":"},
+				"sort_by":   {"release"},
+				"order_by":  {"desc"},
+				"page":      {strconv.Itoa(actorPage)},
+				"limit":     {"24"},
+			}
+			worksBeforePage := len(result.Works)
+			var movieList javDBUIMovieList
+			if err := c.get(ctx, "/v1/movies/tags", params, &movieList); err != nil {
+				return result, fmt.Errorf("JavDB actor works lookup failed: %w", err)
+			}
+			if movieList.Movies == nil {
+				return result, errors.New("JavDB actor works response has no movies array")
+			}
+			if movieList.CurrentPage != 0 && movieList.CurrentPage != actorPage {
+				return result, errors.New("JavDB actor works response page does not match the requested page")
+			}
+			for _, movie := range movieList.Movies {
+				work := javDBUIMetadata(movie)
+				if work.Code == "" {
+					continue
+				}
+				work.SourceURL = defaultJavDBUIWebBase + "movie/" + url.PathEscape(movie.ID)
+				if work.Code == "" || seenCodes[work.Code] {
+					continue
+				}
+				seenCodes[work.Code] = true
+				result.Works = append(result.Works, work)
+			}
+			result.Page++
+			more := len(movieList.Movies) == 24
+			if movieList.HasMore != nil {
+				more = *movieList.HasMore
+			} else if movieList.TotalPages > 0 {
+				more = actorPage < movieList.TotalPages
+			}
+			if !more {
+				break
+			}
+			if len(result.Works) == worksBeforePage {
+				result.HasMore = true
+				result.Complete = false
+				return result, nil
+			}
+			if result.Page >= maxPages {
+				result.HasMore = true
+				result.Complete = false
+				return result, nil
+			}
+			select {
+			case <-ctx.Done():
+				return result, ctx.Err()
+			case <-time.After(300 * time.Millisecond):
+			}
+		}
+	}
+	if len(result.Works) == 0 {
+		return result, errors.New("JavDB actor page contained no recognizable movie entries")
+	}
+	result.Complete = true
+	return result, nil
+}
+
+func javDBUIActorType(raw json.RawMessage) (string, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return "", errors.New("type is missing")
+	}
+	value := strings.TrimSpace(string(raw))
+	if strings.HasPrefix(value, `"`) {
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return "", err
+		}
+	}
+	if value == "" {
+		return "", errors.New("type is empty")
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return "", errors.New("type must be a nonnegative integer")
+		}
+	}
+	n, err := strconv.Atoi(value)
+	if err != nil {
+		return "", errors.New("type is outside the supported integer range")
+	}
+	return strconv.Itoa(n), nil
+}
+
+func exactJavDBUIActorMatches(actors []JavDBUIActor, query string) []JavDBUIActor {
+	matches := []JavDBUIActor{}
+	for _, actor := range actors {
+		if actor.ID != "" && javDBUIActorNameMatches(actor, query) {
+			matches = append(matches, actor)
+		}
+	}
+	return matches
+}
+
+func javDBUIActorNameMatches(actor JavDBUIActor, query string) bool {
+	query = strings.TrimSpace(query)
+	for _, name := range append([]string{actor.Name, actor.NameZHT}, strings.FieldsFunc(actor.OtherName, func(r rune) bool { return r == ',' || r == '，' })...) {
+		if strings.EqualFold(strings.TrimSpace(name), query) {
+			return true
+		}
+	}
+	return false
 }
 
 // JavDBUIActorRecommendations contains the three actor recommendation lists
@@ -105,7 +288,10 @@ type javDBUIEnvelope struct {
 }
 
 type javDBUIMovieList struct {
-	Movies []javDBUIMovie `json:"movies"`
+	Movies      []javDBUIMovie `json:"movies"`
+	CurrentPage int            `json:"current_page,omitempty"`
+	TotalPages  int            `json:"total_pages,omitempty"`
+	HasMore     *bool          `json:"has_more,omitempty"`
 }
 
 type javDBUIMovie struct {

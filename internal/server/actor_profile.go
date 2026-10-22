@@ -137,7 +137,7 @@ func (a *App) resolveActorProfileName(requested string) (string, Object) {
 func emptyActorProfile(name string, aliases []string) Object {
 	name = strings.TrimSpace(name)
 	return Object{
-		"id": actorKey(name), "name": name, "description": "", "biography": "", "birth_date": "", "birth_place": "", "nationality": []string{},
+		"id": actorKey(name), "name": name, "description": "", "biography": "", "biography_scope": "lead_and_career", "biography_truncated": false, "birth_date": "", "birth_place": "", "nationality": []string{},
 		"aliases": aliases, "avatar_url": "", "links": []Object{}, "sources": []Object{}, "updated_at": "", "status": "not_fetched",
 	}
 }
@@ -160,7 +160,7 @@ func (a *App) fetchActorProfile(parent context.Context, name string, aliases []s
 	defer client.CloseIdleConnections()
 	values := url.Values{
 		"action": {"query"}, "titles": {name}, "prop": {"extracts|pageprops|pageimages"}, "redirects": {"1"},
-		"exintro": {"1"}, "explaintext": {"1"}, "pithumbsize": {"400"}, "format": {"json"}, "formatversion": {"2"},
+		"explaintext": {"1"}, "exsectionformat": {"wiki"}, "pithumbsize": {"400"}, "format": {"json"}, "formatversion": {"2"},
 	}
 	var page wikiPageResponse
 	if err := getWikimediaJSON(ctx, client, wikipediaJAURL, values, &page); err != nil {
@@ -247,7 +247,10 @@ func (a *App) fetchActorProfile(parent context.Context, name string, aliases []s
 			break
 		}
 	}
-	profile["biography"] = strings.TrimSpace(wiki.Extract)
+	biography, truncated := selectActorBiographyExcerpt(wiki.Extract, 1200)
+	profile["biography"] = biography
+	profile["biography_scope"] = "lead_and_career"
+	profile["biography_truncated"] = truncated
 	description := entity.Descriptions["ja"].Value
 	if description == "" {
 		description = entity.Descriptions["en"].Value
@@ -261,6 +264,159 @@ func (a *App) fetchActorProfile(parent context.Context, name string, aliases []s
 	profile["sources"] = append(asObjects(profile["sources"]), Object{"label": "Wikidata", "url": "https://www.wikidata.org/wiki/" + entityID})
 	profile["updated_at"] = now()
 	return profile, nil
+}
+
+type biographyArticleSection struct {
+	title string
+	level int
+	text  strings.Builder
+}
+
+// selectActorBiographyExcerpt keeps the page lead and sections whose headings
+// describe the actor's life or career. Headings that introduce works, credits,
+// references, or external links are excluded before applying the rune cap.
+func selectActorBiographyExcerpt(raw string, maxRunes int) (string, bool) {
+	raw = strings.ReplaceAll(strings.ReplaceAll(raw, "\r\n", "\n"), "\r", "\n")
+	lines := strings.Split(raw, "\n")
+	sections := make([]biographyArticleSection, 0, 8)
+	current := biographyArticleSection{}
+	for _, line := range lines {
+		if title, level, ok := parseWikiExtractHeading(line); ok {
+			sections = append(sections, current)
+			current = biographyArticleSection{title: title, level: level}
+			continue
+		}
+		if current.text.Len() > 0 {
+			current.text.WriteByte('\n')
+		}
+		current.text.WriteString(strings.TrimSpace(line))
+	}
+	sections = append(sections, current)
+	selected := make([]string, 0, len(sections))
+	parentIncluded := map[int]bool{}
+	omittedContent := false
+	for i, section := range sections {
+		body := normalizeBiographySection(section.text.String())
+		if i == 0 {
+			if body != "" {
+				selected = append(selected, body)
+			}
+			continue
+		}
+		if body == "" {
+			continue
+		}
+		if excludedBiographyHeading(section.title) {
+			omittedContent = true
+			parentIncluded[section.level] = false
+			for level := section.level + 1; level <= 6; level++ {
+				delete(parentIncluded, level)
+			}
+			continue
+		}
+		include := biographyHeadingMatches(section.title)
+		if !include {
+			for level := section.level - 1; level >= 2; level-- {
+				if parentIncluded[level] {
+					include = true
+					break
+				}
+			}
+		}
+		parentIncluded[section.level] = include
+		for level := section.level + 1; level <= 6; level++ {
+			delete(parentIncluded, level)
+		}
+		if include {
+			selected = append(selected, "【"+strings.TrimSpace(section.title)+"】\n"+body)
+		} else {
+			omittedContent = true
+		}
+	}
+	assembled := strings.TrimSpace(strings.Join(selected, "\n\n"))
+	if maxRunes < 1 {
+		maxRunes = 1200
+	}
+	capped := len([]rune(assembled)) > maxRunes
+	if capped {
+		assembled = truncateBiographyRunes(assembled, maxRunes)
+	}
+	return assembled, omittedContent || capped
+}
+
+func parseWikiExtractHeading(line string) (string, int, bool) {
+	line = strings.TrimSpace(line)
+	level := 0
+	for level < len(line) && line[level] == '=' {
+		level++
+	}
+	if level < 2 || level > 6 || len(line) < level*2 {
+		return "", 0, false
+	}
+	trailing := 0
+	for i := len(line) - 1; i >= 0 && line[i] == '='; i-- {
+		trailing++
+	}
+	if trailing != level {
+		return "", 0, false
+	}
+	title := strings.TrimSpace(line[level : len(line)-trailing])
+	if title == "" {
+		return "", 0, false
+	}
+	return title, level, true
+}
+
+func normalizeBiographySection(text string) string {
+	lines := strings.Split(text, "\n")
+	clean := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.Join(strings.Fields(line), " ")
+		if line == "" {
+			if len(clean) > 0 && clean[len(clean)-1] != "" {
+				clean = append(clean, "")
+			}
+			continue
+		}
+		clean = append(clean, line)
+	}
+	return strings.TrimSpace(strings.Join(clean, "\n"))
+}
+
+func biographyHeadingMatches(title string) bool {
+	lower := strings.ToLower(strings.TrimSpace(title))
+	for _, term := range []string{"来歴", "略歴", "経歴", "生い立ち", "生涯", "人物", "活動", "キャリア", "職業", "芸歴", "career", "biography", "early life", "personal life", "background", "history", "生平", "经历", "個人生活", "个人生活", "职业", "事业"} {
+		if strings.Contains(lower, strings.ToLower(term)) {
+			return true
+		}
+	}
+	return false
+}
+
+func excludedBiographyHeading(title string) bool {
+	lower := strings.ToLower(strings.TrimSpace(title))
+	for _, term := range []string{"作品", "出演", "filmography", "selected films", "film list", "references", "reference", "notes", "bibliography", "external links", "出典", "参考文献", "脚注", "外部リンク", "関連項目", "discography", "作品一覧", "出演一覧", "受賞歴", "award"} {
+		if strings.Contains(lower, strings.ToLower(term)) {
+			return true
+		}
+	}
+	return false
+}
+
+func truncateBiographyRunes(text string, limit int) string {
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return text
+	}
+	cut := limit
+	minimum := limit * 3 / 4
+	for i := limit - 1; i >= minimum; i-- {
+		if runes[i] == '\n' || runes[i] == '。' || runes[i] == '！' || runes[i] == '？' || runes[i] == '!' || runes[i] == '?' || runes[i] == ' ' {
+			cut = i + 1
+			break
+		}
+	}
+	return strings.TrimSpace(string(runes[:cut]))
 }
 
 func hasAdultActorOccupation(entity wikidataEntity) bool {

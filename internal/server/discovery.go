@@ -15,6 +15,14 @@ import (
 // discovery handles catalog search, actor selection, aliases, enrichment and
 // preference-based discovery routes. It returns false for routes it does not own.
 func (a *App) discovery(w http.ResponseWriter, r *http.Request, p []string) bool {
+	if len(p) == 1 && p[0] == "collection-plan" {
+		a.collectionPlan(w, r)
+		return true
+	}
+	if len(p) == 2 && p[0] == "collection-plan" {
+		a.patchCollectionPlan(w, r, p[1])
+		return true
+	}
 	if len(p) == 1 && p[0] == "images" {
 		a.serveRemoteImage(w, r)
 		return true
@@ -331,12 +339,13 @@ func (a *App) actorSelection(w http.ResponseWriter, name string) {
 			synced[str(s["source"])] = true
 		}
 	}
-	coverage["complete"] = len(sourceList) > 0 && len(synced) > 0
+	coverage["catalog_complete"] = len(sourceList) > 0 && len(synced) > 0
 	for _, source := range sourceList {
 		if !synced[source] {
-			coverage["complete"] = false
+			coverage["catalog_complete"] = false
 		}
 	}
+	coverage["complete"] = flag(coverage["catalog_complete"]) && len(suggested) == 0
 	write(w, http.StatusOK, Object{"policy": str(policy["policy"]), "target": actorTarget(policy), "local": local, "suggested": suggested, "coverage": coverage, "sources": sourceList})
 }
 

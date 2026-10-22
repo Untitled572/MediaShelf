@@ -15,10 +15,11 @@ import (
 )
 
 const (
-	actorTranslationTimeout = 20 * time.Second
-	actorTranslationLimit   = 5000
-	myMemoryEndpoint        = "https://api.mymemory.translated.net/get"
-	wikipediaZHEndpoint     = "https://zh.wikipedia.org/w/api.php"
+	actorTranslationTimeout        = 45 * time.Second
+	actorTranslationRequestTimeout = 10 * time.Second
+	actorTranslationLimit          = 1200
+	myMemoryEndpoint               = "https://api.mymemory.translated.net/get"
+	wikipediaZHEndpoint            = "https://zh.wikipedia.org/w/api.php"
 )
 
 type myMemoryResponse struct {
@@ -64,7 +65,7 @@ func (a *App) translateActorProfile(w http.ResponseWriter, r *http.Request, requ
 		return
 	}
 	if len([]rune(biography)) > actorTranslationLimit {
-		fail(w, http.StatusBadRequest, "简介超过 5000 字，暂不支持翻译")
+		fail(w, http.StatusBadRequest, "简介超过 1200 字，暂不支持翻译")
 		return
 	}
 	input := Object{}
@@ -137,9 +138,9 @@ func (a *App) actorTranslationClient() (*http.Client, error) {
 		return a.actorProfileHTTPClient, nil
 	}
 	if a.actorProfileAPIBase != "" {
-		return &http.Client{Timeout: actorTranslationTimeout}, nil
+		return &http.Client{Timeout: actorTranslationRequestTimeout}, nil
 	}
-	transport := &http.Transport{TLSHandshakeTimeout: 8 * time.Second, ResponseHeaderTimeout: 12 * time.Second}
+	transport := &http.Transport{TLSHandshakeTimeout: 8 * time.Second, ResponseHeaderTimeout: actorTranslationRequestTimeout}
 	proxyURL, err := a.outboundProxy()
 	if err != nil {
 		return nil, err
@@ -154,7 +155,7 @@ func (a *App) actorTranslationClient() (*http.Client, error) {
 	} else {
 		transport.DialContext = safeActorTranslationDial
 	}
-	return &http.Client{Transport: transport, Timeout: actorTranslationTimeout, CheckRedirect: func(req *http.Request, via []*http.Request) error {
+	return &http.Client{Transport: transport, Timeout: actorTranslationRequestTimeout, CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 2 || len(via) == 0 || req.URL.Scheme != "https" || !strings.EqualFold(req.URL.Hostname(), via[0].URL.Hostname()) {
 			return errors.New("translation service redirect was rejected")
 		}
@@ -245,7 +246,7 @@ func translateCachedActorBiography(ctx context.Context, client *http.Client, pro
 						return "", "", "", "", hostErr
 					}
 				}
-				pageValues := url.Values{"action": {"query"}, "titles": {title}, "prop": {"extracts"}, "exintro": {"1"}, "explaintext": {"1"}, "format": {"json"}, "formatversion": {"2"}, "variant": {"zh-cn"}}
+				pageValues := url.Values{"action": {"query"}, "titles": {title}, "prop": {"extracts"}, "explaintext": {"1"}, "exsectionformat": {"wiki"}, "format": {"json"}, "formatversion": {"2"}, "variant": {"zh-cn"}}
 				var page actorTranslationWiki
 				if pageErr := getWikimediaJSON(ctx, client, baseZhWiki, pageValues, &page); pageErr == nil && len(page.Query.Pages) > 0 && !page.Query.Pages[0].Missing && strings.TrimSpace(page.Query.Pages[0].Extract) != "" {
 					description = entity.Descriptions["zh-hans"].Value
@@ -253,7 +254,8 @@ func translateCachedActorBiography(ctx context.Context, client *http.Client, pro
 						description = entity.Descriptions["zh"].Value
 					}
 					articleTitle := strings.ReplaceAll(page.Query.Pages[0].Title, " ", "_")
-					return strings.TrimSpace(page.Query.Pages[0].Extract), description, "wikipedia_zh", "https://zh.wikipedia.org/wiki/" + url.PathEscape(articleTitle), nil
+					biography, _ := selectActorBiographyExcerpt(page.Query.Pages[0].Extract, actorTranslationLimit)
+					return biography, description, "wikipedia_zh", "https://zh.wikipedia.org/wiki/" + url.PathEscape(articleTitle), nil
 				}
 			}
 		}
@@ -385,8 +387,10 @@ func cachedProfileWikipediaURL(profile Object) string {
 
 func getTranslationJSON(ctx context.Context, client *http.Client, endpoint string, values url.Values, out *json.RawMessage) error {
 	for attempt := 0; attempt < 2; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"?"+values.Encode(), nil)
+		requestCtx, cancel := context.WithTimeout(ctx, actorTranslationRequestTimeout)
+		req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, endpoint+"?"+values.Encode(), nil)
 		if err != nil {
+			cancel()
 			return err
 		}
 		req.Header.Set("Accept", "application/json")
@@ -395,6 +399,7 @@ func getTranslationJSON(ctx context.Context, client *http.Client, endpoint strin
 		if err == nil {
 			body, readErr := io.ReadAll(io.LimitReader(resp.Body, actorProfileBodyLimit+1))
 			resp.Body.Close()
+			cancel()
 			if readErr != nil {
 				err = readErr
 			} else if len(body) > actorProfileBodyLimit {
@@ -407,6 +412,8 @@ func getTranslationJSON(ctx context.Context, client *http.Client, endpoint strin
 				*out = body
 				return nil
 			}
+		} else {
+			cancel()
 		}
 		if attempt != 0 || ctx.Err() != nil || !retryableWikimediaError(err) {
 			return err

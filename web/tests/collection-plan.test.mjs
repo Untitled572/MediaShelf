@@ -1,0 +1,11 @@
+import {test} from 'node:test'
+import assert from 'node:assert/strict'
+import vm from 'node:vm'
+import {readFileSync} from 'node:fs'
+import ts from 'typescript'
+import {computed,ref} from 'vue'
+const source=readFileSync(new URL('../src/components/CollectionPlan.vue',import.meta.url),'utf8').split('<script setup lang="ts">')[1].split('</script>')[0].replace(/^import .*$/gm,'')
+function planUI(request){const context=vm.createContext({computed,ref,watch(){},onMounted(){},defineExpose(){},defineProps:()=>({actors:[]}),defineEmits:()=>()=>{},request,json:(method,body)=>({method,body:JSON.stringify(body)}),URL});vm.runInContext(ts.transpileModule(source+'\nglobalThis.ui={load,plan,error,filtered,search,statusFilter,setStatus,syncActor,source,loading};',{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.None}}).outputText,context);return context.ui}
+test('plan filters queue and deferred items without contacting downloaders',async()=>{const paths=[];const ui=planUI(async path=>{paths.push(path);return {actors:[],summary:{},items:[{id:'a',code:'AAA-1',title:'one',actors:['A'],status:'planned'},{id:'b',code:'BBB-2',title:'two',actors:['A'],status:'queued'}]}});await ui.load();assert.equal(ui.filtered.value.length,1);ui.statusFilter.value='queued';assert.equal(ui.filtered.value[0].code,'BBB-2');assert.deepEqual(paths,['/collection-plan'])})
+test('failed refresh keeps the last loaded plan and reports the error',async()=>{let fail=false;const ui=planUI(async()=>{if(fail)throw Error('offline');return {actors:[],items:[{id:'a',code:'A',actors:[],status:'planned'}],summary:{}}});await ui.load();fail=true;await ui.load();assert.equal(ui.filtered.value.length,1);assert.equal(ui.error.value,'offline');assert.equal(ui.loading.value,false)})
+test('manual sync keeps a partial-sync failure visible after reloading the cached plan',async()=>{const calls=[];const ui=planUI(async(path,options)=>{calls.push([path,options]);if(path==='/catalog/sync')throw Error('目录未完整');return {actors:[],items:[],summary:{}}});await ui.syncActor('A');assert.equal(ui.error.value,'目录未完整');assert.equal(calls[0][0],'/catalog/sync');assert.deepEqual(JSON.parse(calls[0][1].body),{actor:'A',source:'javdbui',pages:5});assert.equal(calls[1][0],'/collection-plan')})

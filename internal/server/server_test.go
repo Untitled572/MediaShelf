@@ -145,6 +145,7 @@ func TestBackupRestoreAtomic(t *testing.T) {
 	a := testApp(t)
 	a.put("works", Object{"id": "one", "title": "Keep"})
 	a.put("actor_profiles", Object{"id": "actor one", "name": "Actor One", "status": "found"})
+	a.put("collection_plan_items", Object{"id": "code:ABC123", "status": "ignored"})
 	token := login(t, a)
 	w := req(t, a, "GET", "/api/v1/backup", token, nil)
 	var backup Object
@@ -154,7 +155,7 @@ func TestBackupRestoreAtomic(t *testing.T) {
 	}
 	legacyBackup := Object{}
 	for key, value := range backup {
-		if key != "actor_profiles" {
+		if key != "actor_profiles" && key != "collection_plan_items" && key != "catalog_syncs" {
 			legacyBackup[key] = value
 		}
 	}
@@ -177,6 +178,9 @@ func TestBackupRestoreAtomic(t *testing.T) {
 	}
 	if profile, e := a3.get("actor_profiles", "actor one"); e != nil || str(profile["name"]) != "Actor One" {
 		t.Fatalf("current backup did not restore actor profile: %#v %v", profile, e)
+	}
+	if item, e := a3.get("collection_plan_items", "code:ABC123"); e != nil || str(item["status"]) != "ignored" {
+		t.Fatalf("plan state not restored: %v %v", item, e)
 	}
 	backup["tools"] = []any{Object{"invalid": true}}
 	w = req(t, a2, "POST", "/api/v1/restore", login(t, a2), backup)

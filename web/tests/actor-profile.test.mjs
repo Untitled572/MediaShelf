@@ -12,7 +12,7 @@ function panel(request){
 }
 const tick=()=>new Promise(resolve=>setImmediate(resolve))
 test('cached Chinese biography is shown by default without translating again',async()=>{
- const calls=[];const ui=panel(async path=>{calls.push(path);return {status:'found',biography:'Japanese original',biography_zh:'中文简介'}})
+ const calls=[];const ui=panel(async path=>{calls.push(path);return {status:'found',biography_scope:'lead_and_career',biography:'Japanese original',biography_zh:'中文简介'}})
  await ui.load()
  assert.equal(ui.biography.value,'中文简介')
  assert.equal(calls.length,1)
@@ -20,10 +20,12 @@ test('cached Chinese biography is shown by default without translating again',as
  assert.equal(ui.biography.value,'Japanese original')
 })
 test('translation failure preserves the original profile and source links',async()=>{
- const ui=panel(async path=>{if(path.endsWith('/translate'))throw new Error('temporary timeout');return {status:'found',biography:'Original biography',sources:[{label:'Wikipedia',url:'https://ja.wikipedia.org/wiki/Example'}]}})
+ const ui=panel(async path=>{if(path.endsWith('/translate'))throw new Error('temporary timeout');return {status:'found',biography_scope:'lead_and_career',biography:'Original biography',sources:[{label:'Wikipedia',url:'https://ja.wikipedia.org/wiki/Example'}]}})
  await ui.load();await tick()
  assert.equal(ui.biography.value,'Original biography')
  assert.equal(ui.profile.value.sources.length,1)
  assert.equal(ui.translationError.value,'temporary timeout')
  assert.equal(ui.translationLoading.value,false)
 })
+
+test('legacy intro-only cache is expanded once while keeping the cached content visible',async()=>{const calls=[];const ui=panel(async(path,options)=>{calls.push(options?.method||'GET');return options?{status:'found',biography_scope:'lead_and_career',biography:'Long original',biography_zh:'更丰富的中文简介'}:{status:'found',biography:'Short original',biography_zh:'旧简介'}});await ui.load();assert.deepEqual(calls,['GET','POST']);assert.equal(ui.biography.value,'更丰富的中文简介')})

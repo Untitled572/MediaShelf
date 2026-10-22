@@ -683,7 +683,7 @@ func (a *App) backup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result := Object{"schema_version": 1, "created_at": now()}
-	for _, kind := range []string{"works", "actor_policies", "actor_profiles", "catalog", "feeds", "candidates", "settings", "libraries", "tools"} {
+	for _, kind := range []string{"works", "actor_policies", "actor_profiles", "collection_plan_items", "catalog", "catalog_syncs", "feeds", "candidates", "settings", "libraries", "tools"} {
 		v, e := a.listAll(kind)
 		if e != nil {
 			fail(w, 500, e.Error())
@@ -713,10 +713,10 @@ func (a *App) restore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
-	for _, kind := range []string{"works", "actor_policies", "actor_profiles", "catalog", "feeds", "candidates", "settings", "libraries", "tools"} {
+	for _, kind := range []string{"works", "actor_policies", "actor_profiles", "collection_plan_items", "catalog", "catalog_syncs", "feeds", "candidates", "settings", "libraries", "tools"} {
 		raw, exists := o[kind]
-		if kind == "actor_profiles" && !exists {
-			continue // schema-v1 backups created before actor profiles remain valid.
+		if (kind == "actor_profiles" || kind == "collection_plan_items" || kind == "catalog_syncs") && !exists {
+			continue // Older schema-v1 backups remain valid when optional cached state is absent.
 		}
 		arr, ok := raw.([]any)
 		if !ok {

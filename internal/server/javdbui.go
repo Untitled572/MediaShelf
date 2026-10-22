@@ -166,6 +166,71 @@ func (a *App) refreshPublicRecommendations(w http.ResponseWriter, r *http.Reques
 	write(w, 200, Object{"source": source, "imported": imported, "enriched": enriched, "actors": actorCount, "errors": errors})
 }
 
+func (a *App) syncJavDBUICatalog(w http.ResponseWriter, r *http.Request, actor string, input Object) {
+	proxyURL, err := a.outboundProxy()
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	config, _ := a.get("sources", "javdbui")
+	client, err := integrations.NewJavDBUIClient(integrations.CatalogConfig{BaseURL: str(config["base_url"]), ProxyURL: proxyURL})
+	if err != nil {
+		fail(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	pages := int(num(input["pages"]))
+	if pages < 1 {
+		pages = 5
+	}
+	if pages > 50 {
+		pages = 50
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	defer cancel()
+	result, syncErr := client.ActorCatalog(ctx, actor, pages)
+	status := Object{
+		"id": "javdbui:" + actor, "actor": actor, "source": "javdbui", "complete": syncErr == nil && result.Complete,
+		"last_sync": now(), "count": 0, "pages": result.Page,
+	}
+	count := 0
+	for _, movie := range result.Works {
+		x := toObject(movie)
+		x["id"] = catalogID("javdbui", movie.Code)
+		if movie.Code == "" {
+			x["id"] = "javdbui:" + digest(movie.SourceURL)
+		}
+		x["catalog_actor"] = actor
+		x["fetched_at"] = now()
+		if !contains(x["actors"], actor) {
+			actors := stringSlice(x["actors"])
+			actors = append(actors, actor)
+			x["actors"] = actors
+		}
+		if err := a.put("catalog", x); err != nil {
+			status["complete"] = false
+			status["count"] = count
+			status["error"] = err.Error()
+			_ = a.put("catalog_syncs", status)
+			fail(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		count++
+	}
+	status["count"] = count
+	status["has_more"] = result.HasMore
+	if syncErr != nil {
+		status["error"] = syncErr.Error()
+		_ = a.put("catalog_syncs", status)
+		fail(w, http.StatusBadGateway, fmt.Sprintf("已同步 %d 项，尚未完成：%s", count, syncErr))
+		return
+	}
+	if err := a.put("catalog_syncs", status); err != nil {
+		fail(w, http.StatusInternalServerError, "目录同步状态保存失败")
+		return
+	}
+	write(w, http.StatusOK, status)
+}
+
 func (a *App) providerActorRecommendations() []Object {
 	cached, err := a.get("provider_actor_recommendations", "javdbui")
 	if err != nil {

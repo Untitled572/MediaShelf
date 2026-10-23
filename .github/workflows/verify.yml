@@ -1,5 +1,8 @@
 name: verify
-on: [push, pull_request]
+on:
+  push:
+    tags:
+      - '**'
 jobs:
   tests:
     strategy:

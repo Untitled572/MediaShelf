@@ -1,0 +1,17 @@
+services:
+  mediashelf:
+    image: ${MEDIASHELF_IMAGE:-ghcr.io/untitled572/mediashelf:v0.1.1}
+    restart: unless-stopped
+    ports:
+      - "${MEDIASHELF_BIND:-127.0.0.1}:${MEDIASHELF_PORT:-18765}:8765"
+    environment:
+      MEDIASHELF_PASSWORD: ${MEDIASHELF_PASSWORD:?Set a service password}
+      MEDIASHELF_ALLOW_SHORT_PASSWORD: ${MEDIASHELF_ALLOW_SHORT_PASSWORD:-false}
+    volumes:
+      - mediashelf-data:/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+volumes:
+  mediashelf-data:

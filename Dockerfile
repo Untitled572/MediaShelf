@@ -14,6 +14,9 @@ COPY internal ./internal
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /server ./cmd/server
 
 FROM alpine:3.23
+LABEL org.opencontainers.image.source="https://github.com/Untitled572/MediaShelf" \
+      org.opencontainers.image.description="Personal media library with a Windows device agent" \
+      org.opencontainers.image.licenses="GPL-3.0-only"
 RUN apk add --no-cache ca-certificates tzdata && addgroup -g 10001 mediashelf && adduser -D -u 10001 -G mediashelf mediashelf && mkdir /data && chown mediashelf:mediashelf /data
 COPY --from=backend /server /app/server
 COPY --from=web /web/dist /app/web

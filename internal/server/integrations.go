@@ -225,6 +225,12 @@ func (a *App) downloadersAPI(w http.ResponseWriter, r *http.Request, p []string)
 			if !ok {
 				return
 			}
+			if deviceID := str(o["device_id"]); deviceID != "" {
+				if _, err := a.get("devices", deviceID); err != nil {
+					fail(w, 400, "设备不存在")
+					return
+				}
+			}
 			if _, e := integrations.NewQBittorrent(integrations.QBConfig{URL: str(o["url"])}); e != nil {
 				fail(w, 400, e.Error())
 				return
@@ -561,17 +567,25 @@ func (a *App) qbit(ctx context.Context, d Object, op string, params Object) (any
 	return Object{"ok": true}, nil
 }
 func (a *App) remoteQbit(ctx context.Context, d Object, op string, params Object) (any, error) {
-	device, e := a.get("devices", str(d["device_id"]))
+	jid, e := func() (string, error) {
+		a.devicesMu.RLock()
+		defer a.devicesMu.RUnlock()
+		device, e := a.get("devices", str(d["device_id"]))
+		if e != nil {
+			return "", fmt.Errorf("设备不存在")
+		}
+		t, _ := time.Parse(time.RFC3339, str(device["last_seen"]))
+		if time.Since(t) > 90*time.Second {
+			return "", fmt.Errorf("设备离线")
+		}
+		jid := id()
+		j := Object{"id": jid, "device_id": d["device_id"], "type": "qbit", "status": "pending", "created_at": now(), "payload": Object{"request_id": jid, "downloader_id": d["id"], "operation": op, "config": Object{"url": d["url"], "username": d["username"], "password": d["password"]}, "params": params}}
+		if e = a.put("jobs", j); e != nil {
+			return "", e
+		}
+		return jid, nil
+	}()
 	if e != nil {
-		return nil, fmt.Errorf("设备不存在")
-	}
-	t, _ := time.Parse(time.RFC3339, str(device["last_seen"]))
-	if time.Since(t) > 90*time.Second {
-		return nil, fmt.Errorf("设备离线")
-	}
-	jid := id()
-	j := Object{"id": jid, "device_id": d["device_id"], "type": "qbit", "status": "pending", "created_at": now(), "payload": Object{"request_id": jid, "downloader_id": d["id"], "operation": op, "config": Object{"url": d["url"], "username": d["username"], "password": d["password"]}, "params": params}}
-	if e = a.put("jobs", j); e != nil {
 		return nil, e
 	}
 	timer := time.NewTimer(60 * time.Second)
@@ -585,7 +599,10 @@ func (a *App) remoteQbit(ctx context.Context, d Object, op string, params Object
 		case <-timer.C:
 			return nil, fmt.Errorf("设备请求超时，请在任务记录中确认结果后再重试")
 		case <-ticker.C:
-			x, _ := a.get("jobs", jid)
+			x, jobErr := a.get("jobs", jid)
+			if jobErr != nil {
+				return nil, fmt.Errorf("设备或任务已删除")
+			}
 			switch str(x["status"]) {
 			case "done":
 				r := toObject(x["result"])

@@ -27,6 +27,7 @@ type App struct {
 	password   string
 	mu         sync.Mutex
 	scanMu     sync.Mutex
+	devicesMu  sync.RWMutex
 	downloadMu sync.Mutex
 	dataDir    string
 	webDir     string
@@ -270,6 +271,10 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 }
 func (a *App) api(w http.ResponseWriter, r *http.Request) {
 	p := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/"), "/"), "/")
+	if p[0] == "libraries" || p[0] == "tools" || p[0] == "works" || p[0] == "jobs" || p[0] == "restore" || (p[0] == "downloaders" && len(p) == 1) {
+		a.devicesMu.RLock()
+		defer a.devicesMu.RUnlock()
+	}
 	if a.discovery(w, r, p) {
 		return
 	}
@@ -292,7 +297,7 @@ func (a *App) api(w http.ResponseWriter, r *http.Request) {
 	case "actors":
 		a.actorsAPI(w, r, key)
 	case "devices":
-		a.devicesAPI(w, r)
+		a.devicesAPI(w, r, p)
 	case "libraries", "tools":
 		if r.Method == "POST" && len(p) == 3 {
 			o, e := a.get(kind, key)
@@ -417,33 +422,6 @@ func (a *App) configAPI(w http.ResponseWriter, r *http.Request, kind, key string
 		return
 	}
 	a.saveResponse(w, kind, o)
-}
-func (a *App) devicesAPI(w http.ResponseWriter, r *http.Request) {
-	if r.Method == "GET" {
-		ds, _ := a.list("devices")
-		for _, d := range ds {
-			delete(d, "token_hash")
-			t, _ := time.Parse(time.RFC3339, str(d["last_seen"]))
-			d["online"] = time.Since(t) < 90*time.Second
-		}
-		write(w, 200, ds)
-		return
-	}
-	if r.Method != "POST" {
-		fail(w, 405, "Method not allowed")
-		return
-	}
-	o, ok := read(w, r)
-	if !ok {
-		return
-	}
-	token := id()
-	d := Object{"id": id(), "name": str(o["name"]), "token_hash": digest(token), "last_seen": ""}
-	if e := a.put("devices", d); e != nil {
-		fail(w, 500, e.Error())
-		return
-	}
-	write(w, 201, Object{"id": d["id"], "token": token})
 }
 func (a *App) enqueue(w http.ResponseWriter, device, typ string, payload Object) {
 	d, e := a.get("devices", device)

@@ -142,3 +142,17 @@ func validateRemoteImageTarget(ctx context.Context, u *url.URL) error {
 	}
 	return validateExternalHost(ctx, u.Hostname())
 }
+
+// ValidateRemoteImageURL validates a public image destination without fetching
+// its body, for browser-direct redirects.
+func ValidateRemoteImageURL(ctx context.Context, raw string) error {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return err
+	}
+	return validateRemoteImageTarget(ctx, u)
+}
+func RemoteImageNeedsDecoding(raw string) bool {
+	u, err := url.Parse(raw)
+	return err == nil && strings.EqualFold(u.Hostname(), javDBUIImageHost)
+}

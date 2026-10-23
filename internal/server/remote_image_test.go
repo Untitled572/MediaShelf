@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -112,5 +113,43 @@ func TestImageQueryTokenAuthenticationIsNarrowlyScoped(t *testing.T) {
 		if w.Code != tc.want {
 			t.Fatalf("path auth status = %d want %d", w.Code, tc.want)
 		}
+	}
+}
+
+func TestRemoteImageDirectRedirectDoesNotFetchOrCache(t *testing.T) {
+	a := testApp(t)
+	target := "https://8.8.8.8/cover.jpg?size=small"
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/images?redirect=1&url="+url.QueryEscape(target), nil)
+	w := httptest.NewRecorder()
+	a.serveRemoteImageWith(w, r, func(context.Context, string, string) ([]byte, string, error) {
+		t.Fatal("redirect fetched image body")
+		return nil, "", nil
+	})
+	if w.Code != 302 || w.Header().Get("Location") != target || w.Header().Get("Referrer-Policy") != "no-referrer" {
+		t.Fatal(w.Code, w.Header())
+	}
+	if _, err := os.Stat(filepath.Join(a.dataDir, "online-covers")); !os.IsNotExist(err) {
+		t.Fatal("redirect created cache")
+	}
+	for _, target := range []string{"http://127.0.0.1/private", "http://192.168.1.2/img", "file:///secret"} {
+		r := httptest.NewRequest(http.MethodGet, "/api/v1/images?redirect=1&url="+url.QueryEscape(target), nil)
+		w := httptest.NewRecorder()
+		a.serveRemoteImageWith(w, r, nil)
+		if w.Code != 400 {
+			t.Fatalf("redirected unsafe target %s: %d", target, w.Code)
+		}
+	}
+}
+func TestEncryptedRemoteImageKeepsDecodingPath(t *testing.T) {
+	a := testApp(t)
+	calls := 0
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/images?redirect=1&url=https%3A%2F%2Ftp.spfcas.com%2Fcover.jpg", nil)
+	w := httptest.NewRecorder()
+	a.serveRemoteImageWith(w, r, func(context.Context, string, string) ([]byte, string, error) {
+		calls++
+		return []byte("decoded raster"), "image/jpeg", nil
+	})
+	if w.Code != 200 || calls != 1 || w.Header().Get("Location") != "" {
+		t.Fatal(w.Code, w.Header())
 	}
 }

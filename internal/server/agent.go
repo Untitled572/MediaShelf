@@ -27,6 +27,8 @@ func (a *App) agentAuth(r *http.Request) (Object, error) {
 	return nil, fmt.Errorf("device authentication failed")
 }
 func (a *App) agentAPI(w http.ResponseWriter, r *http.Request) {
+	a.devicesMu.RLock()
+	defer a.devicesMu.RUnlock()
 	d, e := a.agentAuth(r)
 	if e != nil {
 		fail(w, 401, "设备认证失败")

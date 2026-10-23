@@ -34,6 +34,18 @@ func (a *App) serveRemoteImageWith(w http.ResponseWriter, r *http.Request, fetch
 		fail(w, http.StatusBadRequest, "有效的 HTTP(S) 图片 URL 为必填项")
 		return
 	}
+	if r.URL.Query().Get("redirect") == "1" && !integrations.RemoteImageNeedsDecoding(rawURL) {
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		if err := integrations.ValidateRemoteImageURL(ctx, rawURL); err != nil {
+			fail(w, http.StatusBadRequest, "图片跳转地址无效："+err.Error())
+			return
+		}
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Cache-Control", "private, max-age=300")
+		http.Redirect(w, r, rawURL, http.StatusFound)
+		return
+	}
 	cacheDir := filepath.Join(a.dataDir, "online-covers")
 	if err := os.MkdirAll(cacheDir, 0700); err != nil {
 		fail(w, http.StatusInternalServerError, "图片缓存不可用")
